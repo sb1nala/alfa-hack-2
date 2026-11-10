@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+data
+storage
+docs
+tests
+eval
+venv
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+*.md
