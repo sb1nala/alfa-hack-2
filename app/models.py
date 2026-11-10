@@ -1,4 +1,4 @@
-"""Общие типы. Менять только по согласованию с командой (docs/PLAN.md, раздел 5)."""
+"""Общие типы. Менять только по согласованию с командой (docs/architecture.md)."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
