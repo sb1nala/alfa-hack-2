@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_LLM_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
+
+
 class ConfigError(RuntimeError):
     """Не хватает обязательной переменной окружения."""
 
@@ -16,9 +19,14 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    llm_project: str
     data_dir: Path
     db_path: Path
     default_timezone: str
+
+    @property
+    def llm_enabled(self) -> bool:
+        return bool(self.llm_api_key and self.llm_model)
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -31,9 +39,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         )
     return Settings(
         telegram_bot_token=token,
-        llm_base_url=env.get("LLM_BASE_URL", "").strip(),
+        llm_base_url=env.get("LLM_BASE_URL", "").strip() or DEFAULT_LLM_BASE_URL,
         llm_api_key=env.get("LLM_API_KEY", "").strip(),
         llm_model=env.get("LLM_MODEL", "").strip(),
+        llm_project=env.get("LLM_PROJECT", "").strip(),
         data_dir=Path(env.get("DATA_DIR", "data")),
         db_path=Path(env.get("DB_PATH", "storage/bot.sqlite3")),
         default_timezone=env.get("DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow",
