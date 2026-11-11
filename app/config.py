@@ -21,7 +21,7 @@ class Settings:
     llm_model: str
     llm_project: str
     data_dir: Path
-    db_path: Path
+    database_url: str
     default_timezone: str
 
     @property
@@ -44,6 +44,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         llm_model=env.get("LLM_MODEL", "").strip(),
         llm_project=env.get("LLM_PROJECT", "").strip(),
         data_dir=Path(env.get("DATA_DIR", "data")),
-        db_path=Path(env.get("DB_PATH", "storage/bot.sqlite3")),
+        database_url=env.get("DATABASE_URL", "").strip(),
         default_timezone=env.get("DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow",
     )

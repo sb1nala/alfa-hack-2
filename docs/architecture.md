@@ -1,8 +1,8 @@
 # Архитектура
 
-Один Python-процесс в Docker: бот на long polling (публичный адрес не нужен), SQLite в volume, поиск по базе знаний внутри процесса, фоновый цикл рассылки напоминаний. Наружу ходим только в Telegram и в LLM API.
+Два контейнера в Docker Compose: бот на long polling (публичный адрес не нужен) и PostgreSQL 16 с данными в volume. Внутри бота — поиск по базе знаний внутри процесса, фоновый цикл рассылки напоминаний. Наружу ходим только в Telegram и в LLM API.
 
-**Стек:** Python 3.12, aiogram 3, SQLite, поиск BM25 со стеммингом (эмбеддинги — под вопросом, см. [team-plan.md](team-plan.md)), чтение выгрузки через `pgdumplib`, LLM через OpenAI-совместимый клиент (`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`), pytest, Docker Compose.
+**Стек:** Python 3.12, aiogram 3, PostgreSQL 16 через `asyncpg`, поиск BM25 со стеммингом (эмбеддинги — под вопросом, см. [team-plan.md](team-plan.md)), чтение выгрузки через `pgdumplib`, LLM через OpenAI-совместимый клиент (`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`), pytest, Docker Compose.
 
 ## Как это работает
 
@@ -29,7 +29,7 @@ Telegram ──> bot (aiogram) ──> assistant.reply()
 
 **Рекомендации.** До трёх материалов: отбор по теме вопроса и тегу-задаче, затем порядок по совпадению с профилем (отрасль, опыт), редакторским связям и популярности. У каждого — одна строка «почему вам». Платный: польза в одном предложении и ссылка, без пересказа. Уже показанное не повторяем.
 
-**Напоминания.** Три вида: своё («напомни в пятницу сверить кассу»), учебное («напоминай продолжать курс по вторникам»), налоговое (по режиму из профиля, из `tax_calendar.yaml`). Текст на естественном языке разбирает LLM → бот показывает, что понял → пользователь подтверждает кнопкой. Повторы храним как RRULE. `/reminders` — список, сменить частоту, пауза, удалить. Цикл читает сроки из SQLite, поэтому перезапуск ничего не теряет.
+**Напоминания.** Три вида: своё («напомни в пятницу сверить кассу»), учебное («напоминай продолжать курс по вторникам»), налоговое (по режиму из профиля, из `tax_calendar.yaml`). Текст на естественном языке разбирает LLM → бот показывает, что понял → пользователь подтверждает кнопкой. Повторы храним как RRULE. `/reminders` — список, сменить частоту, пауза, удалить. Цикл читает сроки из PostgreSQL, поэтому перезапуск ничего не теряет.
 
 **Не раздражать.** Тихие часы 21:00–09:00 по времени пользователя (сообщение уезжает на утро), не больше двух сообщений по инициативе бота в день, кнопки «Отключить» и «Реже» под каждым напоминанием, никаких рассылок без подписки.
 
@@ -49,7 +49,8 @@ app/
   reminders/service.py   create(), list_for(), set_schedule(), pause(), delete(), due()
   reminders/parse.py     parse_request()
   reminders/tax_calendar.yaml
-  storage/db.py      SQLite, миграция при старте
+  storage/db.py      PostgreSQL: connect(), pool(), close()
+  storage/schema.sql таблицы; применяется при каждом старте
   events.py          log_event()
   bot/               хендлеры, клавиатуры, тексты
 tests/
@@ -123,23 +124,26 @@ async def complete(messages: list[dict], json_schema: dict | None = None) -> str
 def search(query: str, k: int = 6) -> list[Chunk]
 # assistant/core.py
 async def reply(user_id: int, text: str) -> Answer
+# storage/db.py
+async def connect(database_url: str) -> asyncpg.Pool
+def pool() -> asyncpg.Pool
 # profile/service.py
-def get(user_id: int) -> UserProfile
+async def get(user_id: int) -> UserProfile
 async def update_from_message(user_id: int, text: str) -> UserProfile
-def reset(user_id: int) -> None
+async def reset(user_id: int) -> None
 # recs/service.py
 def recommend(profile: UserProfile, query: str, exclude_ids: set[str], k: int = 3) -> list[Recommendation]
 # reminders/parse.py
 async def parse_request(text: str, profile: UserProfile, now: datetime) -> Reminder | str   # str = что уточнить
 # reminders/service.py
-def create(reminder: Reminder) -> Reminder
-def list_for(user_id: int) -> list[Reminder]
-def set_schedule(reminder_id: int, rrule: str | None, next_run_at: datetime) -> Reminder
-def pause(reminder_id: int, active: bool) -> None
-def delete(reminder_id: int) -> None
-def due(now: datetime) -> list[Reminder]
+async def create(reminder: Reminder) -> Reminder
+async def list_for(user_id: int) -> list[Reminder]
+async def set_schedule(reminder_id: int, rrule: str | None, next_run_at: datetime) -> Reminder
+async def pause(reminder_id: int, active: bool) -> None
+async def delete(reminder_id: int) -> None
+async def due(now: datetime) -> list[Reminder]
 # events.py
-def log_event(user_id: int, name: str, payload: dict | None = None) -> None
+async def log_event(user_id: int, name: str, payload: dict | None = None) -> None
 ```
 
-Поля `Material` сверены с выгрузкой, откуда что берётся — в [data.md](data.md).
+Всё, что ходит в базу, — `async`. Поля `Material` сверены с выгрузкой, откуда что берётся — в [data.md](data.md).

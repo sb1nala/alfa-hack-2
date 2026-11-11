@@ -24,8 +24,8 @@ def test_defaults_when_only_token_is_set():
 
 def test_values_are_read_from_env():
     settings = load_settings(
-        {"TELEGRAM_BOT_TOKEN": "t", "LLM_MODEL": "m", "DATA_DIR": "/app/data", "DB_PATH": "/s/b.db"}
+        {"TELEGRAM_BOT_TOKEN": "t", "LLM_MODEL": "m", "DATA_DIR": "/app/data", "DATABASE_URL": "postgresql://u:p@db/x"}
     )
     assert settings.llm_model == "m"
     assert settings.data_dir == Path("/app/data")
-    assert settings.db_path == Path("/s/b.db")
+    assert settings.database_url == "postgresql://u:p@db/x"

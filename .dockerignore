@@ -3,7 +3,6 @@
 .env
 .env.*
 data
-storage
 docs
 tests
 eval

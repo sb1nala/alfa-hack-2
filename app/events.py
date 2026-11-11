@@ -1,5 +1,5 @@
-"""Журнал событий для метрик. Роль C."""
+"""Журнал событий для метрик. Роль 3."""
 
 
-def log_event(user_id: int, name: str, payload: dict | None = None) -> None:
+async def log_event(user_id: int, name: str, payload: dict | None = None) -> None:
     raise NotImplementedError
