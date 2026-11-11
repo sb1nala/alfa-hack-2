@@ -13,6 +13,8 @@ from app.bot.handlers import router
 from app.config import ConfigError, load_settings
 from app.kb import search as kb
 from app.kb.ingest import DataError
+from app.llm import client as llm
+from app.llm.client import LLMClient
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,18 @@ async def run() -> None:
     log.info("Читаю выгрузку из %s и строю индекс…", settings.data_dir)
     index = kb.load(settings.data_dir)
     log.info("База знаний загружена: %d фрагментов", len(index))
+    if settings.llm_enabled:
+        llm.configure(
+            LLMClient(
+                api_key=settings.llm_api_key,
+                model=settings.llm_model,
+                base_url=settings.llm_base_url,
+                project=settings.llm_project,
+            )
+        )
+        log.info("LLM подключён: %s", settings.llm_base_url)
+    else:
+        log.warning("LLM_API_KEY или LLM_MODEL не заданы: бот отдаёт материалы без текста ответа")
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
