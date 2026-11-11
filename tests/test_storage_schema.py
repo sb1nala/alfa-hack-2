@@ -6,13 +6,10 @@ pool or public schema. An invalid configured URL is deliberately an error.
 """
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 
 import asyncpg
 import pytest
-import pytest_asyncio
 
 from app.models import Reminder, UserProfile
 from app.storage.db import SCHEMA_PATH
@@ -21,35 +18,6 @@ USER_ID = 5_000_000_001
 OTHER_USER_ID = 5_000_000_002
 TABLES = {"users", "profiles", "reminders", "events", "shown_materials"}
 WHEN = datetime(2026, 11, 12, 10, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
-
-
-@pytest_asyncio.fixture
-async def schema_db():
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url is None:
-        pytest.skip("DATABASE_URL не задан: нужен настоящий PostgreSQL для тестов схемы")
-    # Do not load .env or log the URL (it may contain credentials).
-    connection = await asyncpg.connect(
-        database_url, timeout=10,
-        server_settings={"search_path": "pg_catalog", "timezone": "UTC"},
-    )
-    schema = "test_storage_" + uuid4().hex
-    created = False
-    try:
-        # Only a generated identifier is interpolated; all data uses parameters.
-        await connection.execute(f'CREATE SCHEMA "{schema}"')
-        created = True
-        await connection.execute(f'SET search_path TO "{schema}"')
-        assert await connection.fetchval("SELECT current_schema()") == schema
-        await connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
-        yield connection
-    finally:
-        try:
-            if created:
-                await connection.execute('SET search_path TO pg_catalog')
-                await connection.execute(f'DROP SCHEMA "{schema}" CASCADE')
-        finally:
-            await connection.close()
 
 
 async def add_user(connection, user_id=USER_ID):
