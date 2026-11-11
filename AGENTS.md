@@ -23,7 +23,7 @@
 | --- | --- |
 | Бот | Python 3.12, aiogram 3 (long polling) |
 | База знаний | чтение дампа через `pgdumplib`, поиск BM25, стемминг `snowballstemmer` |
-| Хранилище | SQLite в volume |
+| Хранилище | PostgreSQL 16 (сервис `db` в compose), драйвер `asyncpg`, схема в `app/storage/schema.sql` |
 | LLM | OpenAI-совместимый API: `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | Инфраструктура | Docker, Docker Compose, pytest |
 
@@ -41,7 +41,8 @@
 
 - В `main` — только через PR, ветки `feat/<задача>` или `docs/<тема>`. Один PR — одна задача.
 - Типы из `app/models.py` и сигнатуры из `docs/architecture.md` меняются только отдельным PR с упоминанием тех, кого это касается.
-- Время храним в UTC, в местное переводим только при показе.
+- Время храним в UTC (`timestamptz`), в местное переводим только при показе.
+- Запросы к базе — только через `app/storage/`; SQL с параметрами `$1`, без склейки строк. `schema.sql` применяется при каждом старте, поэтому команды в нём повторяемые (`IF NOT EXISTS`).
 - Логика без ввода-вывода — чистые функции, на каждое поведение есть тест. Тестовые данные придумываем.
 - Тексты бота — на русском, простым языком, без канцелярита и без терминов без объяснения.
 - Новая зависимость — с точной версией в `requirements.txt`.
@@ -52,7 +53,7 @@
 
 ```bash
 cp .env.example .env                 # один раз, затем вписать TELEGRAM_BOT_TOKEN
-docker compose up --build            # бот; выгрузка должна лежать в data/
+docker compose up --build            # бот и PostgreSQL; выгрузка должна лежать в data/
 
 pip install -r requirements-dev.txt  # для тестов без Docker
 pytest                               # тесты на настоящей выгрузке пропускаются, если data/ пуста

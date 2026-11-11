@@ -1,9 +1,9 @@
-"""Профиль бизнеса пользователя. Роль C."""
+"""Профиль бизнеса пользователя. Роль 3."""
 
 from app.models import UserProfile
 
 
-def get(user_id: int) -> UserProfile:
+async def get(user_id: int) -> UserProfile:
     raise NotImplementedError
 
 
@@ -12,5 +12,5 @@ async def update_from_message(user_id: int, text: str) -> UserProfile:
     raise NotImplementedError
 
 
-def reset(user_id: int) -> None:
+async def reset(user_id: int) -> None:
     raise NotImplementedError
