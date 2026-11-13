@@ -6,6 +6,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKey
 
 from app.assistant import core
 from app.bot.render import render_answer
+from app.bot import reminder_list
 from app.bot import tax as tax_ui
 from app.bot.reminders import on_free_text, on_remind, on_reminder_callback
 from app.models import Answer
@@ -24,7 +25,8 @@ HELP_TEXT = (
     "Время — ваше местное; если я не знаю ваш город, считаю по московскому. "
     "Перед сохранением попрошу подтвердить.\n"
     "/taxes — напоминания о сроках налогов и взносов по вашему режиму; "
-    "можно и словами: «напоминай о налогах»."
+    "можно и словами: «напоминай о налогах».\n"
+    "/reminders — ваши напоминания: посмотреть, сменить частоту или отключить."
 )
 
 
@@ -53,11 +55,16 @@ router.message.register(on_remind, Command('remind'))
 router.callback_query.register(on_reminder_callback, F.data.startswith('rd:'))
 router.message.register(tax_ui.start, Command('taxes'))
 router.callback_query.register(tax_ui.on_callback, F.data.startswith('tx:'))
+router.message.register(reminder_list.show, Command('reminders'))
+router.callback_query.register(reminder_list.on_callback, F.data.startswith('rm:'))
 
 
 @router.message(F.text)
 async def on_text(message: Message) -> None:
     if message.from_user is None or message.text is None:
+        return
+    # «Покажи мои напоминания» — до разбора «напомни…»: слова похожи, а смысл другой.
+    if await reminder_list.on_free_text(message):
         return
     # Сначала налоговые напоминания: им не нужна языковая модель, сроки берутся из календаря.
     if await tax_ui.on_free_text(message):
