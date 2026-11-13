@@ -9,7 +9,7 @@ from pathlib import Path
 import snowballstemmer
 
 from app.kb.ingest import load_corpus
-from app.models import Chunk
+from app.models import Chunk, Material
 
 _WORD = re.compile(r"[a-zа-я0-9]+")
 _STEMMER = snowballstemmer.stemmer("russian")
@@ -103,6 +103,7 @@ class SearchIndex:
 
 
 _index: SearchIndex | None = None
+_materials: list[Material] = []
 
 
 def set_index(index: SearchIndex | None) -> None:
@@ -112,9 +113,17 @@ def set_index(index: SearchIndex | None) -> None:
 
 def load(data_dir: Path) -> SearchIndex:
     """Прочитать выгрузку и построить индекс. Вызывается один раз при старте."""
-    index = SearchIndex(load_corpus(data_dir).chunks)
+    global _materials
+    corpus = load_corpus(data_dir)
+    index = SearchIndex(corpus.chunks)
     set_index(index)
+    _materials = corpus.materials
     return index
+
+
+def materials() -> list[Material]:
+    """Все материалы базы знаний после load(): для рекомендаций и словаря профиля."""
+    return list(_materials)
 
 
 def search(query: str, k: int = 6) -> list[Chunk]:
