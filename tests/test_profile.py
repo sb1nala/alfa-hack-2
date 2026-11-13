@@ -247,3 +247,30 @@ async def test_vocabulary_comes_from_materials(storage):
     service.set_vocabulary([cafe])
     profile = await service.update_from_message(7, "у меня кафе, ищу сотрудников")
     assert (profile.industry, profile.current_goal) == ("Рестораны и кафе", "Поиск сотрудников")
+
+
+@pytest.mark.parametrize(
+    ("text", "zone"),
+    [
+        ("У меня ИП, работаю в Чите", "Asia/Yakutsk"),
+        ("я из Уфы", "Asia/Yekaterinburg"),
+        ("живу в Перми", "Asia/Yekaterinburg"),
+        ("мы в Новосибирске", "Asia/Novosibirsk"),
+        ("магазин в Ростове-на-Дону", "Europe/Moscow"),
+        ("работаю в Казани", "Europe/Moscow"),
+    ],
+)
+def test_city_in_any_case_sets_timezone(text, zone):
+    assert extract(text)["timezone"] == zone
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Сидел в читальном зале и думал про кассу",
+        "в уфологии не разбираюсь",
+        "в пермакультуре всё иначе",
+    ],
+)
+def test_word_that_only_starts_like_a_city_does_not_change_timezone(text):
+    assert "timezone" not in extract(text)

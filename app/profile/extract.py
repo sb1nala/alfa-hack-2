@@ -124,8 +124,10 @@ _TIMEZONES = (
     ("Asia/Kamchatka", "камчатк|петропавловск"),
 )
 _CITY_CONTEXT = r"\b(?:в|во|из|живу в|город\w*)\s+(?:город\w*\s+)?"
+# После основы названия допускаем только падежное окончание (до трёх букв): «в Чите», «из Уфы»,
+# но не «в читальном зале» и не «в уфологии» — иначе напоминания уйдут не в тот часовой пояс.
 _TIMEZONE_PATTERNS = tuple(
-    (zone, re.compile(rf"{_CITY_CONTEXT}(?:{cities})\w*")) for zone, cities in _TIMEZONES
+    (zone, re.compile(rf"{_CITY_CONTEXT}(?:{cities})\w{{0,3}}\b")) for zone, cities in _TIMEZONES
 )
 
 # Порядок важен: более точное понятие стоит раньше общего.
