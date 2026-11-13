@@ -16,6 +16,8 @@ from app.kb import search as kb
 from app.kb.ingest import DataError
 from app.llm import client as llm
 from app.llm.client import LLMClient
+from app.profile import service as profile_service
+from app.recs import service as recs
 from app.reminders import worker
 from app.storage import db
 from app.storage.db import DatabaseError
@@ -33,6 +35,9 @@ async def run() -> None:
     log.info("Читаю выгрузку из %s и строю индекс…", settings.data_dir)
     index = kb.load(settings.data_dir)
     log.info("База знаний загружена: %d фрагментов", len(index))
+    # Материалы базы — каталог для рекомендаций и словарь отраслей и задач для профиля.
+    recs.set_catalog(kb.materials())
+    profile_service.set_vocabulary(kb.materials())
     if settings.llm_enabled:
         llm.configure(
             LLMClient(

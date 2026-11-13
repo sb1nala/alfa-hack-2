@@ -72,7 +72,9 @@ def _similar(left: str, right: str) -> bool:
     if not a or not b:
         return False
     common = len(a & b)
-    return common == min(len(a), len(b)) or common * 2 >= max(len(a), len(b))
+    # Все слова короткого названия есть в длинном, либо совпало строго больше половины слов:
+    # «Управление командой» и «Управление рисками» — разные задачи, хотя одно слово общее.
+    return common == min(len(a), len(b)) or common * 2 > max(len(a), len(b))
 
 
 def _experience(profile: UserProfile) -> str | None:
