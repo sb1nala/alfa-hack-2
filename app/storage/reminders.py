@@ -16,13 +16,18 @@ def _model(row: asyncpg.Record | None) -> Reminder | None:
 async def insert(reminder: Reminder) -> Reminder:
     async with db.pool().acquire() as connection:
         async with connection.transaction():
-            await ensure_user(connection, reminder.user_id)
-            row = await connection.fetchrow(
-                "INSERT INTO reminders (user_id, kind, text, next_run_at, rrule, active) "
-                "VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
-                reminder.user_id, reminder.kind, reminder.text, reminder.next_run_at,
-                reminder.rrule, reminder.active,
-            )
+            return await insert_on(connection, reminder)
+
+
+async def insert_on(connection: asyncpg.Connection, reminder: Reminder) -> Reminder:
+    """Insert an already validated model using the caller's transaction."""
+    await ensure_user(connection, reminder.user_id)
+    row = await connection.fetchrow(
+        "INSERT INTO reminders (user_id, kind, text, next_run_at, rrule, active) "
+        "VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+        reminder.user_id, reminder.kind, reminder.text, reminder.next_run_at,
+        reminder.rrule, reminder.active,
+    )
     return _model(row)
 
 

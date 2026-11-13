@@ -7,6 +7,7 @@ pool or public schema. An invalid configured URL is deliberately an error.
 
 import json
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import asyncpg
 import pytest
@@ -17,6 +18,7 @@ from app.storage.db import SCHEMA_PATH
 USER_ID = 5_000_000_001
 OTHER_USER_ID = 5_000_000_002
 TABLES = {"users", "profiles", "reminders", "events", "shown_materials"}
+DELIVERY_TABLES = {"reminder_drafts", "reminder_deliveries", "reminder_blocked_users"}
 WHEN = datetime(2026, 11, 12, 10, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 
 
@@ -27,8 +29,8 @@ async def add_user(connection, user_id=USER_ID):
 async def seed_all(connection, user_id=USER_ID):
     await add_user(connection, user_id)
     await connection.execute("INSERT INTO profiles (user_id) VALUES ($1)", user_id)
-    await connection.execute(
-        "INSERT INTO reminders (user_id, kind, text, next_run_at) VALUES ($1, $2, $3, $4)",
+    reminder_id = await connection.fetchval(
+        "INSERT INTO reminders (user_id, kind, text, next_run_at) VALUES ($1, $2, $3, $4) RETURNING id",
         user_id, "custom", "Проверить вымышленный план", WHEN,
     )
     await connection.execute(
@@ -38,6 +40,19 @@ async def seed_all(connection, user_id=USER_ID):
         "INSERT INTO shown_materials (user_id, material_id) VALUES ($1, $2)",
         user_id, "fictional:article:one",
     )
+    await connection.execute(
+        "INSERT INTO reminder_drafts (id,user_id,text,run_at,timezone,expires_at,reminder_id) "
+        "VALUES ($1,$2,'Synthetic',$3,'UTC',$3,$4)", uuid4(), user_id, WHEN, reminder_id,
+    )
+    await connection.execute(
+        "INSERT INTO reminder_deliveries "
+        "(reminder_id,scheduled_at,revision,state,token,lease_until,retry_at) "
+        "VALUES ($1,$2,'synthetic','retry',$3,$2,$2)", reminder_id, WHEN, uuid4(),
+    )
+    await connection.execute(
+        "INSERT INTO reminder_blocked_users (user_id,blocked_at,error_code) "
+        "VALUES ($1,$2,'synthetic')", user_id, WHEN,
+    )
 
 
 async def test_tables_and_reapplication_preserve_every_row(schema_db):
@@ -45,11 +60,13 @@ async def test_tables_and_reapplication_preserve_every_row(schema_db):
     tables = await connection.fetch(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
     )
-    assert {row["tablename"] for row in tables} == TABLES
+    assert {row["tablename"] for row in tables} == TABLES | DELIVERY_TABLES
     await seed_all(connection)
-    before = {table: await connection.fetch(f'SELECT * FROM "{table}"') for table in TABLES}
+    before = {table: await connection.fetch(f'SELECT * FROM "{table}"')
+              for table in TABLES | DELIVERY_TABLES}
     await connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
-    after = {table: await connection.fetch(f'SELECT * FROM "{table}"') for table in TABLES}
+    after = {table: await connection.fetch(f'SELECT * FROM "{table}"')
+             for table in TABLES | DELIVERY_TABLES}
     assert after == before
     # Identity sequences still produce fresh IDs after another application.
     event_id = await connection.fetchval(
@@ -151,12 +168,17 @@ async def test_user_delete_cascades_only_own_data(schema_db):
     for table in TABLES:
         rows = await schema_db.fetch(f'SELECT user_id FROM "{table}"')
         assert [row["user_id"] for row in rows] == [OTHER_USER_ID]
+    for table in DELIVERY_TABLES:
+        assert await schema_db.fetchval(f'SELECT count(*) FROM "{table}"') == 1
+    assert await schema_db.fetchval(
+        'SELECT r.user_id FROM reminder_deliveries d JOIN reminders r ON r.id=d.reminder_id'
+    ) == OTHER_USER_ID
 
 
 async def test_profile_reset_preserves_user_history(schema_db):
     await seed_all(schema_db)
     await schema_db.execute("DELETE FROM profiles WHERE user_id = $1", USER_ID)
-    for table in TABLES - {"profiles"}:
+    for table in (TABLES | DELIVERY_TABLES) - {"profiles"}:
         assert await schema_db.fetchval(f'SELECT count(*) FROM "{table}"') == 1
 
 
@@ -218,3 +240,19 @@ async def test_required_fields_reject_null(schema_db, table, column):
         await schema_db.execute(
             f'UPDATE "{table}" SET "{column}" = NULL WHERE user_id = $1', USER_ID,
         )
+
+
+async def test_extension_preserves_pre_delivery_schema_data(schema_db):
+    # Recreate the previous deployment's shape inside this isolated test schema.
+    for table in ('reminder_drafts', 'reminder_deliveries', 'reminder_blocked_users'):
+        await schema_db.execute(f'DROP TABLE {table}')
+    await add_user(schema_db)
+    await schema_db.execute(
+        "INSERT INTO reminders (user_id,kind,text,next_run_at) VALUES ($1,'custom','Synthetic',$2)",
+        USER_ID, WHEN,
+    )
+    before = {table: await schema_db.fetch(f'SELECT * FROM {table}') for table in TABLES}
+    await schema_db.execute(SCHEMA_PATH.read_text(encoding='utf-8'))
+    assert {table: await schema_db.fetch(f'SELECT * FROM {table}') for table in TABLES} == before
+    for table in DELIVERY_TABLES:
+        assert await schema_db.fetchval(f'SELECT count(*) FROM {table}') == 0
