@@ -2,6 +2,8 @@
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import asyncpg
+
 from app.models import UserProfile
 from app.storage import db
 from app.storage._common import ensure_user, validate_user_id
@@ -47,12 +49,33 @@ async def get(user_id: int) -> UserProfile:
     return UserProfile(**dict(row)) if row is not None else UserProfile(user_id=user_id)
 
 
-async def update(user_id: int, changes: dict[str, str | None]) -> UserProfile:
-    """Validate before writing; None clears nullable fields, omission preserves them."""
+async def update(
+    user_id: int, changes: dict[str, str | None], *,
+    connection: asyncpg.Connection | None = None,
+) -> UserProfile:
+    """Validate before writing; None clears nullable fields, omission preserves them.
+
+    With connection, participate in the caller's transaction without acquiring
+    another pool connection; otherwise own a transaction as before.
+    """
     validate_user_id(user_id)
     changes = _validate_changes(changes)
+    if connection is not None:
+        # The caller owns the transaction (e.g. profile UI step + field write).
+        return await _update(connection, user_id, changes)
     if not changes:
         return await get(user_id)
+    async with db.pool().acquire() as connection:
+        async with connection.transaction():
+            return await _update(connection, user_id, changes)
+
+
+async def _update(
+    connection: asyncpg.Connection, user_id: int, changes: dict[str, str | None],
+) -> UserProfile:
+    if not changes:
+        row = await connection.fetchrow("SELECT * FROM profiles WHERE user_id = $1", user_id)
+        return UserProfile(**dict(row)) if row else UserProfile(user_id=user_id)
     columns = [_COLUMNS[name] for name in changes]
     placeholders = ", ".join(f"${i}" for i in range(1, len(columns) + 2))
     assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in columns)
@@ -60,14 +83,13 @@ async def update(user_id: int, changes: dict[str, str | None]) -> UserProfile:
         f"INSERT INTO profiles (user_id, {', '.join(columns)}) VALUES ({placeholders}) "
         f"ON CONFLICT (user_id) DO UPDATE SET {assignments} RETURNING *"
     )
-    async with db.pool().acquire() as connection:
-        async with connection.transaction():
-            await ensure_user(connection, user_id)
-            row = await connection.fetchrow(query, user_id, *changes.values())
+    await ensure_user(connection, user_id)
+    row = await connection.fetchrow(query, user_id, *changes.values())
     return UserProfile(**dict(row))
 
 
-async def reset(user_id: int) -> None:
+async def reset(user_id: int, *, connection: asyncpg.Connection | None = None) -> None:
     """Delete only the profile; retain the user, reminders and history."""
     validate_user_id(user_id)
-    await db.pool().execute("DELETE FROM profiles WHERE user_id = $1", user_id)
+    await (connection if connection is not None else db.pool()).execute(
+        "DELETE FROM profiles WHERE user_id = $1", user_id)

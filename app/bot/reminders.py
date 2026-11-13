@@ -84,6 +84,11 @@ def reset_pending() -> None:
     _pending.clear()
 
 
+def cancel_pending(user_id: int) -> None:
+    """Explicit commands must not become the answer to a reminder clarification."""
+    _pending.pop(user_id, None)
+
+
 async def on_free_text(message: Message) -> bool:
     """Просьба о напоминании обычной речью. True — сообщение обработано, False — это вопрос."""
     if message.chat.type != 'private' or message.from_user is None or not message.text:

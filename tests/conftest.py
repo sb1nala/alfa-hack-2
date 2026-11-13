@@ -61,3 +61,19 @@ async def storage_db(schema_db, monkeypatch):
     finally:
         for pool in pools:
             await pool.close()
+
+
+@pytest.fixture
+def no_profile_input(monkeypatch):
+    """Existing reminder-only routing fixtures have no active profile UI."""
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    from app import events
+    from app.storage import profile_ui
+
+    monkeypatch.setattr(profile_ui, 'current', AsyncMock(return_value=None))
+    monkeypatch.setattr(profile_ui, 'cancel', AsyncMock())
+    monkeypatch.setattr(profile_ui, 'open_menu', AsyncMock(return_value=profile_ui.Session(
+        101, uuid4(), 0, 'home', None, False, 'offered', datetime(2027, 1, 1, tzinfo=timezone.utc))))
+    monkeypatch.setattr(events, 'log_event', AsyncMock())

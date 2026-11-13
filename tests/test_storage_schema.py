@@ -18,6 +18,7 @@ from app.storage.db import SCHEMA_PATH
 USER_ID = 5_000_000_001
 OTHER_USER_ID = 5_000_000_002
 TABLES = {"users", "profiles", "reminders", "events", "shown_materials"}
+UI_TABLES = {"profile_ui_sessions"}
 DELIVERY_TABLES = {"reminder_drafts", "reminder_deliveries", "reminder_blocked_users"}
 WHEN = datetime(2026, 11, 12, 10, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 
@@ -29,6 +30,10 @@ async def add_user(connection, user_id=USER_ID):
 async def seed_all(connection, user_id=USER_ID):
     await add_user(connection, user_id)
     await connection.execute("INSERT INTO profiles (user_id) VALUES ($1)", user_id)
+    await connection.execute(
+        "INSERT INTO profile_ui_sessions (user_id,token,mode,expires_at) VALUES ($1,$2,'menu',$3)",
+        user_id, uuid4(), WHEN,
+    )
     reminder_id = await connection.fetchval(
         "INSERT INTO reminders (user_id, kind, text, next_run_at) VALUES ($1, $2, $3, $4) RETURNING id",
         user_id, "custom", "Проверить вымышленный план", WHEN,
@@ -60,13 +65,13 @@ async def test_tables_and_reapplication_preserve_every_row(schema_db):
     tables = await connection.fetch(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
     )
-    assert {row["tablename"] for row in tables} == TABLES | DELIVERY_TABLES
+    assert {row["tablename"] for row in tables} == TABLES | DELIVERY_TABLES | UI_TABLES
     await seed_all(connection)
     before = {table: await connection.fetch(f'SELECT * FROM "{table}"')
-              for table in TABLES | DELIVERY_TABLES}
+              for table in TABLES | DELIVERY_TABLES | UI_TABLES}
     await connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
     after = {table: await connection.fetch(f'SELECT * FROM "{table}"')
-             for table in TABLES | DELIVERY_TABLES}
+             for table in TABLES | DELIVERY_TABLES | UI_TABLES}
     assert after == before
     # Identity sequences still produce fresh IDs after another application.
     event_id = await connection.fetchval(
@@ -151,6 +156,8 @@ async def test_invalid_kind(schema_db):
 
 @pytest.mark.parametrize("statement", [
     "INSERT INTO profiles (user_id) VALUES ($1)",
+    "INSERT INTO profile_ui_sessions (user_id,token,mode,expires_at) "
+    "VALUES ($1,'00000000-0000-0000-0000-000000000001','idle',now())",
     "INSERT INTO reminders (user_id, kind, text, next_run_at) "
     "VALUES ($1, 'custom', 'Synthetic', now())",
     "INSERT INTO events (user_id, name) VALUES ($1, 'synthetic')",
@@ -165,7 +172,7 @@ async def test_user_delete_cascades_only_own_data(schema_db):
     await seed_all(schema_db)
     await seed_all(schema_db, OTHER_USER_ID)
     await schema_db.execute("DELETE FROM users WHERE user_id = $1", USER_ID)
-    for table in TABLES:
+    for table in TABLES | UI_TABLES:
         rows = await schema_db.fetch(f'SELECT user_id FROM "{table}"')
         assert [row["user_id"] for row in rows] == [OTHER_USER_ID]
     for table in DELIVERY_TABLES:
@@ -178,7 +185,7 @@ async def test_user_delete_cascades_only_own_data(schema_db):
 async def test_profile_reset_preserves_user_history(schema_db):
     await seed_all(schema_db)
     await schema_db.execute("DELETE FROM profiles WHERE user_id = $1", USER_ID)
-    for table in (TABLES | DELIVERY_TABLES) - {"profiles"}:
+    for table in (TABLES | DELIVERY_TABLES | UI_TABLES) - {"profiles"}:
         assert await schema_db.fetchval(f'SELECT count(*) FROM "{table}"') == 1
 
 
@@ -202,6 +209,7 @@ async def test_shown_material_pair_is_unique(schema_db):
 
 
 @pytest.mark.parametrize("table,column", [
+    ("profile_ui_sessions", "expires_at"),
     ("users", "created_at"), ("reminders", "next_run_at"),
     ("events", "occurred_at"), ("shown_materials", "shown_at"),
 ])
@@ -227,6 +235,9 @@ async def test_query_indexes_exist_in_test_schema(schema_db):
 
 
 @pytest.mark.parametrize("table,column", [
+    ("profile_ui_sessions", "token"), ("profile_ui_sessions", "mode"),
+    ("profile_ui_sessions", "revision"), ("profile_ui_sessions", "expires_at"),
+    ("profile_ui_sessions", "onboarding_status"), ("profile_ui_sessions", "expects_text"),
     ("users", "created_at"), ("profiles", "timezone"),
     ("reminders", "user_id"), ("reminders", "kind"), ("reminders", "text"),
     ("reminders", "next_run_at"), ("reminders", "active"),
