@@ -29,19 +29,27 @@ def less_often(
     if "COUNT" in fields:
         # Keep COUNT and additionally reduce it to events of the slower rule
         # within the original finite calendar horizon. Never restart the count.
-        last = list(_events(start, rule))[-1]
+        original_events = list(_events(start, rule))
+        last = original_events[-1]
         candidate = (
             canonical.splitlines()[0]
             + "\nRRULE:"
             + ";".join(f"{k}={v}" for k, v in fields.items())
         )
         _, anchor, slower = _parse(candidate)
+        candidate_events = list(_events(anchor, slower))
+        threshold = max(aware_utc(now), reminder.next_run_at - timedelta(seconds=1))
+        remaining = sum(event > threshold for event in original_events)
+        past = sum(event <= threshold for event in candidate_events)
         fields["COUNT"] = str(
             min(
                 int(fields["COUNT"]),
-                sum(event <= last for event in _events(anchor, slower)),
+                sum(event <= last for event in candidate_events),
+                past + remaining,
             )
         )
+        if not remaining:
+            raise ValueError("Конечный повтор завершён. Создайте новое напоминание.")
     changed = (
         canonical.splitlines()[0]
         + "\nRRULE:"

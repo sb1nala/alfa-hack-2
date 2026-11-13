@@ -389,6 +389,8 @@ def proposal(token, action, rule, run):
         }[action]
     )
     text = f"<b>{label}?</b>"
+    if rule and "UNTIL=" in rule and action != "less":
+        text += "\nПри смене частоты число событий до конечной даты может измениться. Конечная дата UNTIL сохранится."
     if action == "once":
         text += "\nПовтор и его COUNT/UNTIL будут удалены: останется одно событие."
     if (
