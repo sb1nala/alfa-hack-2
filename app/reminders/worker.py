@@ -64,16 +64,23 @@ async def _send(item: store.Claim, bot: Bot, clock: Callable[[], datetime]) -> N
         await quota.finish(item, 'released')
         await store.complete(item, now, state='obsolete')
         return
-    zone = await quota.current_zone(item, aware_utc(clock()))
+    checked_at = aware_utc(clock())
+    zone, retry_at = await quota.current_zone(item, checked_at)
     now = aware_utc(clock())
     if zone is None:
-        await quota.finish(item, 'released')
-        await store.complete(item, now, state='retry', retry_at=now)
+        await store.complete(item, now, state='retry', error_code='delivery_window',
+                             retry_at=retry_at if retry_at is not None and retry_at > now
+                             else now + backoff(item.attempts))
         return
     permitted = allowed_at(now, zone)
     if permitted != now:
         await quota.finish(item, 'released')
         await store.complete(item, now, state='retry', retry_at=permitted)
+        return
+    # Waiting for the quota transaction can consume the checked lease margin.
+    if now + timedelta(seconds=HTTP_TIMEOUT) >= checked_at + store.AUTHORIZATION_MARGIN:
+        await quota.finish(item, 'released')
+        await store.complete(item, now, state='retry', retry_at=now + backoff(item.attempts))
         return
     try:
         async with asyncio.timeout(HTTP_TIMEOUT):

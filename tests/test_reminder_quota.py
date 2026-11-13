@@ -296,3 +296,70 @@ async def test_profile_change_after_reservation_defers_full_day(
     event = await pool.fetchrow("SELECT * FROM reminder_deliveries WHERE reminder_id=$1", third.id)
     assert event["state"] == "sent" and event["token"] != claim.token
     assert event["scheduled_at"] == third.next_run_at and event["attempts"] == 2
+
+
+async def test_parallel_reservations_recheck_last_slot_after_zone_change(storage_db, monkeypatch):
+    pool, _ = storage_db
+    b = bot()
+    clock = Clock(START.replace(hour=17))
+    await create(when=clock())
+    await worker.run_once(b, clock)
+    clock.now = START.replace(day=6, hour=8)
+    await create(when=clock())
+    await create(when=clock())
+
+    reserve = quota.reserve
+    reserved = []
+    both_reserved = asyncio.Event()
+    zone_changed = asyncio.Event()
+
+    async def reserve_before_zone_change(item, now):
+        zone = await reserve(item, now)
+        reserved.append(zone)
+        if len(reserved) == 2:
+            both_reserved.set()
+        await zone_changed.wait()
+        return zone
+
+    monkeypatch.setattr(quota, "reserve", reserve_before_zone_change)
+    task = asyncio.create_task(worker.run_once(b, clock))
+    try:
+        await asyncio.wait_for(both_reserved.wait(), 3)
+        assert reserved == ["Europe/Moscow", "Europe/Moscow"]
+        await profiles.update(USER, {"timezone": "Asia/Vladivostok"})
+    finally:
+        zone_changed.set()
+        await task
+
+    assert b.send_message.await_count == 2
+    assert await pool.fetchval("SELECT count(*) FROM reminder_quota WHERE state='sent'") == 2
+    assert await pool.fetchval(
+        "SELECT retry_at FROM reminder_deliveries WHERE state='retry'",
+    ) == START.replace(day=6, hour=23)
+    assert await pool.fetchval(
+        "SELECT day_end FROM reminder_quota WHERE state='sent' AND reserved_at=$1", clock(),
+    ) == START.replace(day=6, hour=21)
+    assert await worker.run_once(b, clock) == 0
+
+
+async def test_quota_recheck_delay_cannot_send_on_expired_lease(storage_db, monkeypatch):
+    pool, _ = storage_db
+    b = bot()
+    clock = Clock()
+    reminder = await create()
+    recheck = quota.current_zone
+
+    async def delayed_recheck(item, now):
+        result = await recheck(item, now)
+        clock.now += delivery.LEASE
+        return result
+
+    monkeypatch.setattr(quota, "current_zone", delayed_recheck)
+    assert await worker.run_once(b, clock) == 1
+    b.send_message.assert_not_awaited()
+    assert await pool.fetchval("SELECT state FROM reminder_quota") == "released"
+    assert await reminders.get(reminder.id) == reminder
+
+    monkeypatch.setattr(quota, "current_zone", recheck)
+    assert await worker.run_once(b, clock) == 1
+    b.send_message.assert_awaited_once()
