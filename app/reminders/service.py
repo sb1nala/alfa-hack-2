@@ -38,7 +38,8 @@ async def _schedule(value: str | None, instant: datetime, user_id: int) -> str |
     return canonicalize(value, instant, zone)
 
 
-async def create(reminder: Reminder) -> Reminder:
+def validate_new(reminder: Reminder) -> Reminder:
+    """Shared pure validation for creation, including transactional confirmation."""
     if not isinstance(reminder, Reminder):
         raise TypeError("reminder must be Reminder")
     if type(reminder.id) is not int:
@@ -52,6 +53,12 @@ async def create(reminder: Reminder) -> Reminder:
     require_text(reminder.text, "text")
     _active(reminder.active)
     instant = aware_utc(reminder.next_run_at)
+    return replace(reminder, next_run_at=instant)
+
+
+async def create(reminder: Reminder) -> Reminder:
+    reminder = validate_new(reminder)
+    instant = reminder.next_run_at
     rule = await _schedule(reminder.rrule, instant, reminder.user_id)
     return await reminders.insert(replace(reminder, next_run_at=instant, rrule=rule))
 

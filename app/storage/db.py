@@ -35,8 +35,12 @@ async def connect(database_url: str, attempts: int = 10, delay: float = 2.0) -> 
             last_error = f"{type(error).__name__}: {error}"
             log.info("База данных ещё не готова (%s), попытка %d из %d", last_error, attempt + 1, attempts)
             continue
-        async with pool.acquire() as connection:
-            await connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+        try:
+            async with pool.acquire() as connection:
+                await connection.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+        except BaseException:
+            await pool.close()
+            raise
         _pool = pool
         return pool
     raise DatabaseError(f"База данных недоступна после {attempts} попыток: {last_error}")

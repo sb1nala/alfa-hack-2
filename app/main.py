@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import sys
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -15,6 +16,7 @@ from app.kb import search as kb
 from app.kb.ingest import DataError
 from app.llm import client as llm
 from app.llm.client import LLMClient
+from app.reminders import worker
 from app.storage import db
 from app.storage.db import DatabaseError
 
@@ -43,15 +45,30 @@ async def run() -> None:
         log.info("LLM подключён: %s", settings.llm_base_url)
     else:
         log.warning("LLM_API_KEY или LLM_MODEL не заданы: бот отдаёт материалы без текста ответа")
-    await db.connect(settings.database_url)
-    log.info("База данных подключена")
-    bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dispatcher = Dispatcher()
-    dispatcher.include_router(router)
+    bot = None
+    delivery_task = None
     try:
-        await dispatcher.start_polling(bot)
+        await db.connect(settings.database_url)
+        log.info("База данных подключена")
+        bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        dispatcher = Dispatcher()
+        dispatcher.include_router(router)
+        delivery_task = asyncio.create_task(worker.run(bot), name="reminder-delivery")
+        # aiogram otherwise closes the session in start_polling's finally,
+        # before this worker can be stopped. This scope owns the session.
+        await dispatcher.start_polling(bot, close_bot_session=False)
     finally:
-        await db.close()
+        try:
+            if delivery_task is not None:
+                delivery_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await delivery_task
+        finally:
+            try:
+                await db.close()
+            finally:
+                if bot is not None:
+                    await bot.session.close()
 
 
 def main() -> None:

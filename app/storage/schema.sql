@@ -53,3 +53,46 @@ CREATE TABLE IF NOT EXISTS shown_materials (
     shown_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, material_id)
 );
+
+-- Durable confirmation; a draft is never read by due() or the delivery worker.
+CREATE TABLE IF NOT EXISTS reminder_drafts (
+    id UUID PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    run_at TIMESTAMPTZ NOT NULL,
+    timezone TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'confirmed', 'cancelled', 'expired')),
+    reminder_id BIGINT REFERENCES reminders(id) ON DELETE SET NULL
+);
+
+-- One event per original scheduled instant, independent of delivery attempts.
+-- xmin of the reminder is captured as an optimistic row version, never exposed
+-- through SELECT * -> Reminder. Any intervening UPDATE invalidates completion.
+CREATE TABLE IF NOT EXISTS reminder_deliveries (
+    reminder_id BIGINT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+    scheduled_at TIMESTAMPTZ NOT NULL,
+    revision TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('sending', 'retry', 'sent', 'failed', 'obsolete')),
+    token UUID NOT NULL,
+    lease_until TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    retry_at TIMESTAMPTZ NOT NULL,
+    sent_at TIMESTAMPTZ,
+    message_id BIGINT,
+    error_code TEXT,
+    PRIMARY KEY (reminder_id, scheduled_at)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS reminder_one_sender_idx
+    ON reminder_deliveries (reminder_id) WHERE state = 'sending';
+CREATE INDEX IF NOT EXISTS reminder_retry_idx
+    ON reminder_deliveries (retry_at) WHERE state = 'retry';
+
+-- A Forbidden response suppresses ALL further reminders for this recipient,
+-- including future creations, until an operator explicitly clears this row.
+CREATE TABLE IF NOT EXISTS reminder_blocked_users (
+    user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+    blocked_at TIMESTAMPTZ NOT NULL,
+    error_code TEXT NOT NULL
+);
