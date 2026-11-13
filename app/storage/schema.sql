@@ -98,3 +98,18 @@ CREATE TABLE IF NOT EXISTS reminder_blocked_users (
     blocked_at TIMESTAMPTZ NOT NULL,
     error_code TEXT NOT NULL
 );
+
+-- One current UI session per owner. Replacing the UUID invalidates every old
+-- menu; revision makes a step single-use. No UI columns belong in profiles.
+CREATE TABLE IF NOT EXISTS profile_ui_sessions (
+    user_id BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+    token UUID NOT NULL UNIQUE,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    mode TEXT NOT NULL CHECK (mode IN ('idle', 'offer', 'home', 'onboarding', 'menu', 'edit', 'delete')),
+    field TEXT CHECK (field IN ('business_stage', 'industry', 'legal_form', 'tax_regime',
+                               'experience', 'current_goal', 'timezone')),
+    expects_text BOOLEAN NOT NULL DEFAULT false,
+    onboarding_status TEXT NOT NULL DEFAULT 'new'
+        CHECK (onboarding_status IN ('new', 'offered', 'completed', 'skipped')),
+    expires_at TIMESTAMPTZ NOT NULL
+);

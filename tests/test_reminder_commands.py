@@ -87,7 +87,7 @@ class FakeSession(BaseSession):
 
 
 @pytest.fixture
-async def dispatch(monkeypatch):
+async def dispatch(monkeypatch, no_profile_input):
     session = FakeSession()
     bot = Bot('123456:fake-test-token', session=session)
     dispatcher = Dispatcher()

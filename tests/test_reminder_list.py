@@ -113,7 +113,7 @@ def test_list_request_detection(text, expected):
 
 
 @pytest.fixture
-async def chat(monkeypatch):
+async def chat(monkeypatch, no_profile_input):
     session = FakeSession()
     bot = Bot('123456:fake-test-token', session=session)
     dispatcher = Dispatcher()

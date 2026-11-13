@@ -153,7 +153,7 @@ def test_tax_request_detection(text, expected):
 
 
 @pytest.fixture
-async def chat(monkeypatch, no_kb):
+async def chat(monkeypatch, no_kb, no_profile_input):
     session = FakeSession()
     bot = Bot('123456:fake-test-token', session=session)
     dispatcher = Dispatcher()
