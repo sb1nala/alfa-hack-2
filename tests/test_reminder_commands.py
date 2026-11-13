@@ -62,7 +62,10 @@ def test_html_escaped_and_telegram_limit_reserved():
     for body in ['x' * 3400, '&' * 680, '😀' * 1700]:
         assert units(confirmation(body, NOW, 'Europe/Moscow')) <= 4096
         assert units(delivery(body)) <= 4096
-    assert '2026-01-01 03:00 (Europe/Moscow)' in confirmation('план', NOW, 'Europe/Moscow')
+    assert '01.01.2026 03:00, московское время' in confirmation('план', NOW, 'Europe/Moscow')
+    assert '01.01.2026 10:00, владивостокское время' in confirmation('план', NOW, 'Asia/Vladivostok')
+    assert 'часовой пояс UTC' in confirmation('план', NOW, 'UTC')
+    assert 'Europe/' not in USAGE and 'профил' not in USAGE
 
 
 class FakeSession(BaseSession):

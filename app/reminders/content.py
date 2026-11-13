@@ -4,6 +4,23 @@ from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
+# Как назвать часовой пояс человеку: «московское время», а не «Europe/Moscow».
+ZONE_LABELS = {
+    'Europe/Kaliningrad': 'калининградское время',
+    'Europe/Moscow': 'московское время',
+    'Europe/Samara': 'самарское время',
+    'Asia/Yekaterinburg': 'екатеринбургское время',
+    'Asia/Omsk': 'омское время',
+    'Asia/Novosibirsk': 'новосибирское время',
+    'Asia/Krasnoyarsk': 'красноярское время',
+    'Asia/Irkutsk': 'иркутское время',
+    'Asia/Yakutsk': 'якутское время',
+    'Asia/Vladivostok': 'владивостокское время',
+    'Asia/Magadan': 'магаданское время',
+    'Asia/Sakhalin': 'сахалинское время',
+    'Asia/Kamchatka': 'камчатское время',
+}
+
 MAX_ESCAPED_TEXT = 3400  # Conservative: reserve service lines even before HTML parsing.
 
 
@@ -26,10 +43,14 @@ def checked_text(text: str) -> str:
     return text
 
 
+def zone_label(zone: str) -> str:
+    return ZONE_LABELS.get(zone, f'часовой пояс {zone}')
+
+
 def confirmation(text: str, run_at: datetime, zone: str) -> str:
     local = run_at.astimezone(ZoneInfo(zone))
     return (f'<b>Создать напоминание?</b>\n{escape(checked_text(text))}\n\n'
-            f'{local:%Y-%m-%d %H:%M} ({escape(zone)})\n'
+            f'{local:%d.%m.%Y %H:%M}, {escape(zone_label(zone))}\n'
             'Подтверждение действует 15 минут.')
 
 

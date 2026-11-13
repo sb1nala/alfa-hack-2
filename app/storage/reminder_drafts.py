@@ -24,6 +24,11 @@ async def create(user_id: int, text: str, run_at: datetime, zone: str, now: date
     async with db.pool().acquire() as connection:
         async with connection.transaction():
             await ensure_user(connection, user_id)
+            # Пользователь сам пишет боту — значит, он его разблокировал. Без этого запрет,
+            # поставленный после TelegramForbiddenError, остался бы навсегда: напоминание
+            # «сохранено», но никогда не придёт.
+            await connection.execute(
+                'DELETE FROM reminder_blocked_users WHERE user_id=$1', user_id)
             await connection.execute(
                 'INSERT INTO reminder_drafts (id,user_id,text,run_at,timezone,expires_at) '
                 'VALUES ($1,$2,$3,$4,$5,$6)', draft_id, user_id, text,

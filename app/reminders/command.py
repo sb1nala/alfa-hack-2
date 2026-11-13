@@ -11,7 +11,7 @@ from app.reminders.schedule import aware_utc
 
 USAGE = ('Используйте /remind ГГГГ-ММ-ДД ЧЧ:ММ Текст напоминания.\n'
          'Например: /remind 2027-01-15 10:00 Проверить план.\n'
-         'Дата и время — в часовом поясе вашего профиля; без профиля — Europe/Moscow.')
+         'Дата и время — по вашему местному времени. Если я не знаю ваш город, считаю по московскому.')
 
 
 def parse_command(text: str, zone: str, now: datetime) -> tuple[str, datetime]:
