@@ -6,17 +6,13 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKey
 
 from app.assistant import core
 from app.bot.render import render_answer
-from app.bot import reminder_list
+from app.bot import onboarding, reminder_list
 from app.bot import tax as tax_ui
 from app.bot.reminders import on_free_text, on_remind, on_reminder_callback
 from app.models import Answer
 
 router = Router()
 
-START_TEXT = (
-    "Здравствуйте! Я помощник «Альфа-Курса» для предпринимателей.\n\n"
-    "Задайте вопрос о бизнесе — отвечу по материалам платформы и подскажу, что изучить дальше."
-)
 HELP_TEXT = (
     "Напишите вопрос обычным текстом.\n\n/start — начать заново\n/help — эта подсказка\n"
     "Чтобы поставить напоминание, просто попросите: «напомни завтра в 10 сверить кассу» "
@@ -26,7 +22,8 @@ HELP_TEXT = (
     "Перед сохранением попрошу подтвердить.\n"
     "/taxes — напоминания о сроках налогов и взносов по вашему режиму; "
     "можно и словами: «напоминай о налогах».\n"
-    "/reminders — ваши напоминания: посмотреть, сменить частоту или отключить."
+    "/reminders — ваши напоминания: посмотреть, сменить частоту или отключить.\n"
+    "/profile — что я знаю о вашем бизнесе; можно обновить или попросить забыть."
 )
 
 
@@ -43,7 +40,7 @@ def options_keyboard(answer: Answer) -> ReplyKeyboardMarkup | ReplyKeyboardRemov
 
 @router.message(CommandStart())
 async def on_start(message: Message) -> None:
-    await message.answer(START_TEXT)
+    await onboarding.start(message)
 
 
 @router.message(Command("help"))
@@ -57,6 +54,8 @@ router.message.register(tax_ui.start, Command('taxes'))
 router.callback_query.register(tax_ui.on_callback, F.data.startswith('tx:'))
 router.message.register(reminder_list.show, Command('reminders'))
 router.callback_query.register(reminder_list.on_callback, F.data.startswith('rm:'))
+router.message.register(onboarding.show_profile, Command('profile'))
+router.callback_query.register(onboarding.on_callback, F.data.startswith('ob:'))
 
 
 @router.message(F.text)
