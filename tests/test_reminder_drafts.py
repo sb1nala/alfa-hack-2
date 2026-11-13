@@ -96,3 +96,19 @@ async def test_deleted_confirmed_reminder_old_button(storage_db):
     await reminders.delete(reminder.id)
     assert await drafts.decide(key, USER, True, NOW) == 'deleted'
     assert await service.list_for(USER) == []  # Never recreate from an old confirmed button.
+
+
+async def test_returning_user_is_unblocked_only_for_themselves(storage_db):
+    """A user who blocked the bot and came back must get reminders again."""
+    pool, _ = storage_db
+    other = USER + 1
+    await drafts.create(other, 'Чужой вымышленный план', RUN, 'Europe/Moscow', NOW)
+    for user in (USER, other):
+        await pool.execute(
+            "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING", user)
+        await pool.execute(
+            "INSERT INTO reminder_blocked_users (user_id,blocked_at,error_code) "
+            "VALUES ($1,$2,'TelegramForbiddenError')", user, NOW)
+    await new()
+    blocked = await pool.fetch('SELECT user_id FROM reminder_blocked_users')
+    assert [row['user_id'] for row in blocked] == [other]
