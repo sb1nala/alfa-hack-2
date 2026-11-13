@@ -16,6 +16,7 @@ from app.models import Reminder
 from app.storage import db
 
 LEASE = timedelta(seconds=90)
+AUTHORIZATION_MARGIN = timedelta(seconds=20)
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,7 @@ async def authorize(item: Claim, now: datetime) -> bool:
           AND d.scheduled_at=$3 AND d.token=$4 AND d.state='sending'
           AND d.lease_until > $5
           AND NOT EXISTS (SELECT 1 FROM reminder_blocked_users b WHERE b.user_id=r.user_id)
-    ''', r.id, item.revision, r.next_run_at, item.token, now + timedelta(seconds=20)))
+    ''', r.id, item.revision, r.next_run_at, item.token, now + AUTHORIZATION_MARGIN))
 
 
 async def complete(item: Claim, now: datetime, *, state: str, error_code: str | None = None,

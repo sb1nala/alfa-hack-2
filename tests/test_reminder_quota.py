@@ -230,3 +230,136 @@ async def test_zone_change_across_local_date_counts_saved_utc(storage_db):
     assert (
         b.send_message.await_count == 2
     )  # both UTC instants fall in this new local day
+
+
+@pytest.mark.parametrize(
+    "initial_zone,new_zone,first_hour,attempt_hour,retry_at",
+    [
+        ("Europe/Moscow", "Asia/Vladivostok", 17, 8, START.replace(day=6, hour=23)),
+        ("Atlantic/Cape_Verde", None, 21, 10, START.replace(day=7, hour=6)),
+    ],
+)
+async def test_profile_change_after_reservation_defers_full_day(
+    storage_db, monkeypatch, initial_zone, new_zone, first_hour, attempt_hour, retry_at,
+):
+    pool, _ = storage_db
+    b = bot()
+    clock = Clock(START.replace(hour=first_hour))
+    await profiles.update(USER, {"timezone": initial_zone})
+    await create(when=clock())
+    await create(when=clock())
+    assert await worker.run_once(b, clock) == 2
+    assert b.send_message.await_count == 2
+    sent_quota = await pool.fetch("SELECT * FROM reminder_quota ORDER BY token")
+    sent_deliveries = await pool.fetch("SELECT * FROM reminder_deliveries ORDER BY reminder_id")
+
+    clock.now = START.replace(day=6, hour=attempt_hour)
+    third = await create(when=clock())
+    other = await create(user=USER + 1, when=clock())
+    reserve = quota.reserve
+    claim = None
+
+    async def change_profile_after_reserve(item, now):
+        nonlocal claim
+        zone = await reserve(item, now)
+        if item.reminder.id == third.id and claim is None:
+            assert zone == initial_zone
+            claim = item
+            if new_zone is None:
+                await profiles.reset(USER)
+            else:
+                await profiles.update(USER, {"timezone": new_zone})
+        return zone
+
+    monkeypatch.setattr(quota, "reserve", change_profile_after_reserve)
+    assert await worker.run_once(b, clock) == 2
+    assert [call.args[0] for call in b.send_message.await_args_list] == [USER, USER, USER + 1]
+    assert claim is not None
+    event = await pool.fetchrow("SELECT * FROM reminder_deliveries WHERE reminder_id=$1", third.id)
+    assert event["state"] == "retry" and event["retry_at"] == retry_at
+    assert event["scheduled_at"] == third.next_run_at and event["token"] == claim.token
+    assert event["lease_until"] == clock() + delivery.LEASE and event["attempts"] == 1
+    assert await reminders.get(third.id) == third
+    assert not (await reminders.get(other.id)).active
+    assert await pool.fetchval("SELECT state FROM reminder_quota WHERE token=$1", claim.token) == "released"
+    assert await pool.fetch(
+        "SELECT * FROM reminder_quota WHERE user_id=$1 AND state='sent' ORDER BY token", USER,
+    ) == sent_quota
+    assert await pool.fetch(
+        "SELECT * FROM reminder_deliveries WHERE reminder_id < $1 ORDER BY reminder_id", third.id,
+    ) == sent_deliveries
+    assert await worker.run_once(b, clock) == 0
+
+    clock.now = retry_at
+    assert await worker.run_once(b, clock) == 1
+    assert b.send_message.await_count == 4
+    event = await pool.fetchrow("SELECT * FROM reminder_deliveries WHERE reminder_id=$1", third.id)
+    assert event["state"] == "sent" and event["token"] != claim.token
+    assert event["scheduled_at"] == third.next_run_at and event["attempts"] == 2
+
+
+async def test_parallel_reservations_recheck_last_slot_after_zone_change(storage_db, monkeypatch):
+    pool, _ = storage_db
+    b = bot()
+    clock = Clock(START.replace(hour=17))
+    await create(when=clock())
+    await worker.run_once(b, clock)
+    clock.now = START.replace(day=6, hour=8)
+    await create(when=clock())
+    await create(when=clock())
+
+    reserve = quota.reserve
+    reserved = []
+    both_reserved = asyncio.Event()
+    zone_changed = asyncio.Event()
+
+    async def reserve_before_zone_change(item, now):
+        zone = await reserve(item, now)
+        reserved.append(zone)
+        if len(reserved) == 2:
+            both_reserved.set()
+        await zone_changed.wait()
+        return zone
+
+    monkeypatch.setattr(quota, "reserve", reserve_before_zone_change)
+    task = asyncio.create_task(worker.run_once(b, clock))
+    try:
+        await asyncio.wait_for(both_reserved.wait(), 3)
+        assert reserved == ["Europe/Moscow", "Europe/Moscow"]
+        await profiles.update(USER, {"timezone": "Asia/Vladivostok"})
+    finally:
+        zone_changed.set()
+        await task
+
+    assert b.send_message.await_count == 2
+    assert await pool.fetchval("SELECT count(*) FROM reminder_quota WHERE state='sent'") == 2
+    assert await pool.fetchval(
+        "SELECT retry_at FROM reminder_deliveries WHERE state='retry'",
+    ) == START.replace(day=6, hour=23)
+    assert await pool.fetchval(
+        "SELECT day_end FROM reminder_quota WHERE state='sent' AND reserved_at=$1", clock(),
+    ) == START.replace(day=6, hour=21)
+    assert await worker.run_once(b, clock) == 0
+
+
+async def test_quota_recheck_delay_cannot_send_on_expired_lease(storage_db, monkeypatch):
+    pool, _ = storage_db
+    b = bot()
+    clock = Clock()
+    reminder = await create()
+    recheck = quota.current_zone
+
+    async def delayed_recheck(item, now):
+        result = await recheck(item, now)
+        clock.now += delivery.LEASE
+        return result
+
+    monkeypatch.setattr(quota, "current_zone", delayed_recheck)
+    assert await worker.run_once(b, clock) == 1
+    b.send_message.assert_not_awaited()
+    assert await pool.fetchval("SELECT state FROM reminder_quota") == "released"
+    assert await reminders.get(reminder.id) == reminder
+
+    monkeypatch.setattr(quota, "current_zone", recheck)
+    assert await worker.run_once(b, clock) == 1
+    b.send_message.assert_awaited_once()
