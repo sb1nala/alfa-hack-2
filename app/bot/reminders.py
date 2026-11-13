@@ -37,9 +37,10 @@ def draft_keyboard(draft_id: UUID) -> InlineKeyboardMarkup:
     ]])
 
 
-def disable_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
+def disable_keyboard(reminder_id: int, revision: str | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='Отключить', callback_data=f'rd:off:{reminder_id}')]])
+        InlineKeyboardButton(text='Отключить', callback_data=f'rd:off:{reminder_id}'),
+        *([InlineKeyboardButton(text='Реже', callback_data=f'rm:less:{reminder_id}:{revision}')] if revision else [])]])
 
 
 async def on_remind(message: Message) -> None:
@@ -141,6 +142,9 @@ async def on_free_text(message: Message) -> bool:
 
 
 async def on_reminder_callback(callback: CallbackQuery) -> None:
+    if callback.message is None or callback.message.chat.type != 'private':
+        await callback.answer('Управление доступно в личном чате.', show_alert=True)
+        return
     result = 'missing'
     try:
         _, action, key = (callback.data or '').split(':', 2)

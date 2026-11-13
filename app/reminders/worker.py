@@ -1,9 +1,9 @@
-"""Bounded at-least-once delivery with durable retry and fenced leases.
+"""Bounded delivery attempts with durable retry, quota and fenced leases.
 
 An HTTP request already started cannot be reliably cancelled by «Отключить».
 If Telegram accepted a message but the DB commit fails, recovery may duplicate
-it: Telegram sendMessage has no idempotency key. Ordinary completed events are
-never sent twice. Cancelled attempts remain leased and recover after expiry.
+it within the daily attempt quota: Telegram sendMessage has no idempotency key.
+Ordinary completed events are never sent twice. Cancelled attempts remain leased and recover after expiry.
 """
 
 import asyncio
@@ -21,6 +21,8 @@ from app.models import Reminder
 from app.reminders.content import delivery
 from app.reminders.schedule import aware_utc, next_occurrence
 from app.storage import reminder_delivery as store
+from app.storage import reminder_quota as quota
+from app.reminders.policy import allowed_at
 
 log = logging.getLogger(__name__)
 HTTP_TIMEOUT = 15  # Hard outer deadline, below 90s lease with a 20s authorization margin.
@@ -53,22 +55,45 @@ async def _send(item: store.Claim, bot: Bot, clock: Callable[[], datetime]) -> N
     except ValueError:
         await store.complete(item, aware_utc(clock()), state='failed', error_code='invalid_text')
         return
+    zone = await quota.reserve(item, aware_utc(clock()))
+    if zone is None:
+        return
+    # Recheck after the database roundtrip, directly before starting HTTP.
+    now = aware_utc(clock())
+    if not await store.authorize(item, now):
+        await quota.finish(item, 'released')
+        await store.complete(item, now, state='obsolete')
+        return
+    zone = await quota.current_zone(item, aware_utc(clock()))
+    now = aware_utc(clock())
+    if zone is None:
+        await quota.finish(item, 'released')
+        await store.complete(item, now, state='retry', retry_at=now)
+        return
+    permitted = allowed_at(now, zone)
+    if permitted != now:
+        await quota.finish(item, 'released')
+        await store.complete(item, now, state='retry', retry_at=permitted)
+        return
     try:
         async with asyncio.timeout(HTTP_TIMEOUT):
             message = await bot.send_message(
                 item.reminder.user_id, text, parse_mode='HTML',
-                reply_markup=disable_keyboard(item.reminder.id), request_timeout=12)
+                reply_markup=disable_keyboard(item.reminder.id, item.token.hex), request_timeout=12)
     except TelegramRetryAfter as error:
+        await quota.finish(item, 'released')
         now = aware_utc(clock())
         await store.complete(item, now, state='retry', error_code='TelegramRetryAfter',
                              retry_at=now + max(backoff(item.attempts),
                                                 timedelta(seconds=error.retry_after)))
         return
     except TelegramForbiddenError:
+        await quota.finish(item, 'released')
         await store.complete(item, aware_utc(clock()), state='failed',
                              error_code='TelegramForbiddenError', blocked=True)
         return
     except (TelegramBadRequest, TelegramNotFound) as error:
+        await quota.finish(item, 'released')
         await store.complete(item, aware_utc(clock()), state='failed',
                              error_code=type(error).__name__)
         return
@@ -78,6 +103,7 @@ async def _send(item: store.Claim, bot: Bot, clock: Callable[[], datetime]) -> N
         await store.complete(item, now, state='retry', error_code=type(error).__name__,
                              retry_at=now + backoff(item.attempts))
         return
+    await quota.finish(item, 'sent')
     completed_at = aware_utc(clock())
     # Delivery succeeded: even a calculation failure records sent and stops.
     next_run, error_code = following(item.reminder, completed_at)

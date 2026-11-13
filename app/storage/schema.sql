@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS reminder_deliveries (
     token UUID NOT NULL,
     lease_until TIMESTAMPTZ NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 1,
+    -- Earliest attempt availability (quiet hours/quota or transport backoff).
+    -- Never replaces the original scheduled_at or reminders.next_run_at.
     retry_at TIMESTAMPTZ NOT NULL,
     sent_at TIMESTAMPTZ,
     message_id BIGINT,
@@ -112,4 +114,33 @@ CREATE TABLE IF NOT EXISTS profile_ui_sessions (
     onboarding_status TEXT NOT NULL DEFAULT 'new'
         CHECK (onboarding_status IN ('new', 'offered', 'completed', 'skipped')),
     expires_at TIMESTAMPTZ NOT NULL
+);
+
+-- Independent of reminder FK: deleting a reminder cannot refund daily quota.
+-- started includes uncertain HTTP outcomes and crash windows; never auto-refund.
+CREATE TABLE IF NOT EXISTS reminder_quota (
+    token UUID PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    reserved_at TIMESTAMPTZ NOT NULL,
+    day_end TIMESTAMPTZ NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('started','sent','released'))
+);
+CREATE INDEX IF NOT EXISTS reminder_quota_user_idx ON reminder_quota(user_id, reserved_at);
+
+CREATE TABLE IF NOT EXISTS reminder_actions (
+    token UUID PRIMARY KEY,
+    reminder_id BIGINT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    revision TEXT NOT NULL,
+    action TEXT NOT NULL,
+    rrule TEXT,
+    run_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS reminder_delivery_buttons (
+    token UUID PRIMARY KEY,
+    reminder_id BIGINT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+    revision TEXT NOT NULL
 );
