@@ -47,10 +47,33 @@ def zone_label(zone: str) -> str:
     return ZONE_LABELS.get(zone, f'часовой пояс {zone}')
 
 
-def confirmation(text: str, run_at: datetime, zone: str) -> str:
+REPEAT_LABELS = {
+    'DAILY': 'каждый день',
+    'WEEKLY': 'каждую неделю',
+    'MONTHLY': 'каждый месяц',
+    'YEARLY': 'каждый год',
+}
+WEEKDAY_LABELS = ('понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье')
+
+
+def repeat_label(rrule: str | None) -> str | None:
+    """«каждую неделю» для правила с FREQ=WEEKLY; None для разового напоминания."""
+    if not rrule:
+        return None
+    for part in rrule.replace('\n', ';').replace('RRULE:', ';').split(';'):
+        if part.startswith('FREQ='):
+            return REPEAT_LABELS.get(part[5:])
+    return None
+
+
+def confirmation(text: str, run_at: datetime, zone: str, rrule: str | None = None) -> str:
     local = run_at.astimezone(ZoneInfo(zone))
+    repeat = repeat_label(rrule)
+    when = f'{local:%d.%m.%Y %H:%M}, {WEEKDAY_LABELS[local.weekday()]}, {escape(zone_label(zone))}'
+    if repeat:
+        when = f'Первый раз: {when}\nПовтор: {repeat}'
     return (f'<b>Создать напоминание?</b>\n{escape(checked_text(text))}\n\n'
-            f'{local:%d.%m.%Y %H:%M}, {escape(zone_label(zone))}\n'
+            f'{when}\n'
             'Подтверждение действует 15 минут.')
 
 

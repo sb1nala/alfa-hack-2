@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS reminder_drafts (
         CHECK (state IN ('pending', 'confirmed', 'cancelled', 'expired')),
     reminder_id BIGINT REFERENCES reminders(id) ON DELETE SET NULL
 );
+-- Canonical recurrence (DTSTART + RRULE) fixed at draft creation; NULL for a one-off.
+ALTER TABLE reminder_drafts ADD COLUMN IF NOT EXISTS rrule TEXT;
 
 -- One event per original scheduled instant, independent of delivery attempts.
 -- xmin of the reminder is captured as an optimistic row version, never exposed

@@ -6,7 +6,7 @@ from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKey
 
 from app.assistant import core
 from app.bot.render import render_answer
-from app.bot.reminders import on_remind, on_reminder_callback
+from app.bot.reminders import on_free_text, on_remind, on_reminder_callback
 from app.models import Answer
 
 router = Router()
@@ -17,8 +17,9 @@ START_TEXT = (
 )
 HELP_TEXT = (
     "Напишите вопрос обычным текстом.\n\n/start — начать заново\n/help — эта подсказка\n"
-    "/remind ГГГГ-ММ-ДД ЧЧ:ММ Текст — разовое напоминание, например:\n"
-    "/remind 2027-01-15 10:00 Проверить план\n"
+    "Чтобы поставить напоминание, просто попросите: «напомни завтра в 10 сверить кассу» "
+    "или «напоминай каждый понедельник в 9:30 проверять заказы».\n"
+    "Можно и точной командой: /remind 2027-01-15 10:00 Проверить план\n"
     "Время — ваше местное; если я не знаю ваш город, считаю по московскому. "
     "Перед сохранением попрошу подтвердить."
 )
@@ -52,6 +53,8 @@ router.callback_query.register(on_reminder_callback, F.data.startswith('rd:'))
 @router.message(F.text)
 async def on_text(message: Message) -> None:
     if message.from_user is None or message.text is None:
+        return
+    if await on_free_text(message):
         return
     answer = await core.reply(message.from_user.id, message.text)
     await message.answer(

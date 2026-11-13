@@ -112,3 +112,20 @@ async def test_returning_user_is_unblocked_only_for_themselves(storage_db):
     await new()
     blocked = await pool.fetch('SELECT user_id FROM reminder_blocked_users')
     assert [row['user_id'] for row in blocked] == [other]
+
+
+async def test_recurring_draft_keeps_its_rule_through_confirmation(storage_db):
+    key = await drafts.create(
+        USER, 'Проверять вымышленные заказы', RUN, 'Asia/Vladivostok', NOW, 'FREQ=DAILY')
+    assert await service.list_for(USER) == []
+    assert await drafts.decide(key, USER, True, NOW) == 'confirmed'
+    saved, = await service.list_for(USER)
+    assert saved.next_run_at == RUN
+    # Правило закреплено за часовым поясом на момент создания черновика.
+    assert saved.rrule == 'DTSTART;TZID=Asia/Vladivostok:20260101T110000\nRRULE:FREQ=DAILY'
+
+
+async def test_rule_that_does_not_match_the_first_date_is_rejected(storage_db):
+    with pytest.raises(ValueError):
+        await drafts.create(USER, 'План', RUN, 'Europe/Moscow', NOW, 'FREQ=WEEKLY;BYDAY=MO')
+    assert await storage_db[0].fetchval('SELECT count(*) FROM reminder_drafts') == 0
