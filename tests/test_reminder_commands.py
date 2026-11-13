@@ -13,7 +13,7 @@ from aiogram.types import Update
 
 from app.bot import handlers
 from app.bot import reminders as ui
-from app.models import Answer, UserProfile
+from app.models import Answer, Reminder, UserProfile
 from app.reminders.command import USAGE, parse_command
 from app.reminders.content import checked_text, confirmation, delivery, units
 from app.storage import profiles, reminder_delivery, reminder_drafts
@@ -62,8 +62,8 @@ def test_html_escaped_and_telegram_limit_reserved():
     for body in ['x' * 3400, '&' * 680, '😀' * 1700]:
         assert units(confirmation(body, NOW, 'Europe/Moscow')) <= 4096
         assert units(delivery(body)) <= 4096
-    assert '01.01.2026 03:00, московское время' in confirmation('план', NOW, 'Europe/Moscow')
-    assert '01.01.2026 10:00, владивостокское время' in confirmation('план', NOW, 'Asia/Vladivostok')
+    assert '01.01.2026 03:00, четверг, московское время' in confirmation('план', NOW, 'Europe/Moscow')
+    assert '01.01.2026 10:00, четверг, владивостокское время' in confirmation('план', NOW, 'Asia/Vladivostok')
     assert 'часовой пояс UTC' in confirmation('план', NOW, 'UTC')
     assert 'Europe/' not in USAGE and 'профил' not in USAGE
 
@@ -101,6 +101,8 @@ async def dispatch(monkeypatch):
     monkeypatch.setattr(reminder_drafts, 'create', AsyncMock(return_value=uuid4()))
     monkeypatch.setattr(reminder_drafts, 'decide', AsyncMock(return_value='confirmed'))
     monkeypatch.setattr(reminder_delivery, 'disable', AsyncMock(return_value='disabled'))
+    ui.reset_pending()
+    monkeypatch.setattr(ui.llm, 'is_configured', lambda: True)
 
     async def feed(text=None, *, data=None, group=False, inaccessible=False):
         message = {'message_id': 1, 'date': 0 if inaccessible else 1,
@@ -196,3 +198,87 @@ async def test_existing_start_help_and_question(dispatch):
     reply.assert_not_awaited()
     await feed('Вопрос о плане')
     reply.assert_awaited_once_with(101, 'Вопрос о плане')
+
+
+def parsed(text='Сверить кассу', rrule=None):
+    return Reminder(0, 101, 'custom', text, NOW.replace(hour=12), rrule)
+
+
+async def test_free_text_reminder_creates_draft_and_skips_assistant(dispatch, monkeypatch):
+    feed, reply = dispatch
+    parse_request = AsyncMock(return_value=parsed(rrule='FREQ=DAILY'))
+    monkeypatch.setattr(ui, 'parse_request', parse_request)
+    calls = await feed('Напоминай каждый день в 15 сверять кассу')
+    reply.assert_not_awaited()
+    assert parse_request.await_args.args[0] == 'Напоминай каждый день в 15 сверять кассу'
+    args = reminder_drafts.create.await_args.args
+    assert args[:2] == (101, 'Сверить кассу') and args[3] == 'Europe/Moscow' and args[5] == 'FREQ=DAILY'
+    sent = calls[-1]
+    assert isinstance(sent, SendMessage) and 'Создать напоминание?' in sent.text
+    assert 'Повтор: каждый день' in sent.text and sent.reply_markup is not None
+
+
+async def test_missing_time_is_asked_and_the_answer_completes_the_request(dispatch, monkeypatch):
+    feed, reply = dispatch
+    parse_request = AsyncMock(side_effect=['Во сколько напомнить?', parsed()])
+    monkeypatch.setattr(ui, 'parse_request', parse_request)
+    calls = await feed('напомни завтра сверить кассу')
+    assert calls[-1].text == 'Во сколько напомнить?'
+    reminder_drafts.create.assert_not_awaited()
+    await feed('в 10 утра')  # в ответе нет слова «напомни» — он дополняет прошлую просьбу
+    assert parse_request.await_args.args[0] == 'напомни завтра сверить кассу\nв 10 утра'
+    reminder_drafts.create.assert_awaited_once()
+    reply.assert_not_awaited()
+    await feed('что такое франшиза')  # просьба закрыта, дальше обычные вопросы
+    reply.assert_awaited_once_with(101, 'что такое франшиза')
+
+
+async def test_new_question_instead_of_clarification_goes_to_assistant(dispatch, monkeypatch):
+    feed, reply = dispatch
+    monkeypatch.setattr(ui, 'parse_request', AsyncMock(side_effect=['Во сколько?', ui.NotReminder()]))
+    await feed('напомни сверить кассу')
+    await feed('как выбрать налоговый режим')
+    reply.assert_awaited_once_with(101, 'как выбрать налоговый режим')
+    reminder_drafts.create.assert_not_awaited()
+
+
+async def test_question_that_mentions_reminders_is_still_a_question(dispatch, monkeypatch):
+    feed, reply = dispatch
+    monkeypatch.setattr(ui, 'parse_request', AsyncMock(side_effect=ui.NotReminder()))
+    await feed('как напоминать клиентам об оплате')
+    reply.assert_awaited_once_with(101, 'как напоминать клиентам об оплате')
+
+
+async def test_ordinary_question_never_reaches_the_reminder_parser(dispatch, monkeypatch):
+    feed, reply = dispatch
+    parse_request = AsyncMock()
+    monkeypatch.setattr(ui, 'parse_request', parse_request)
+    await feed('что такое франшиза')
+    parse_request.assert_not_awaited()
+    reply.assert_awaited_once()
+
+
+async def test_without_model_free_text_reminder_gets_the_exact_format(dispatch, monkeypatch):
+    feed, reply = dispatch
+    monkeypatch.setattr(ui.llm, 'is_configured', lambda: False)
+    calls = await feed('напомни завтра в 10 сверить кассу')
+    assert '/remind' in calls[-1].text
+    reply.assert_not_awaited()
+    reminder_drafts.create.assert_not_awaited()
+
+
+async def test_model_failure_is_reported_without_details(dispatch, monkeypatch):
+    feed, reply = dispatch
+    monkeypatch.setattr(ui, 'parse_request', AsyncMock(side_effect=RuntimeError('secret key')))
+    calls = await feed('напомни завтра в 10 сверить кассу')
+    assert '/remind' in calls[-1].text and 'secret' not in calls[-1].text
+    reply.assert_not_awaited()
+
+
+async def test_free_text_reminder_in_group_is_treated_as_a_question(dispatch, monkeypatch):
+    feed, reply = dispatch
+    parse_request = AsyncMock()
+    monkeypatch.setattr(ui, 'parse_request', parse_request)
+    await feed('напомни завтра в 10 сверить кассу', group=True)
+    parse_request.assert_not_awaited()
+    reply.assert_awaited_once()
