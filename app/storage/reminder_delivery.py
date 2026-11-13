@@ -3,6 +3,9 @@
 Lock order is always reminder -> event. xmin is an optimistic row version:
 any pause, resume, schedule/text update invalidates a claimed snapshot, even
 when values are later restored (ABA). Sent events are never reclaimed.
+Failed events may be reclaimed only by a changed reminder version: a user edit
+allows a fresh attempt with the latest schedule/text. A permanent error on an
+unchanged version still stops the reminder, so scans cannot retry it forever.
 """
 
 from dataclasses import dataclass
@@ -83,6 +86,7 @@ async def claim(now: datetime, limit: int = 10) -> list[Claim]:
                   AND (d.reminder_id IS NULL
                        OR (d.state='sending' AND d.lease_until <= $1)
                        OR (d.state='retry' AND d.retry_at <= $1)
+                       OR (d.state='failed' AND d.revision <> r.xmin::text)
                        OR d.state='obsolete')
                 ORDER BY r.next_run_at, r.id LIMIT $2 FOR UPDATE OF r SKIP LOCKED
             ''', now, limit)
@@ -103,6 +107,7 @@ async def claim(now: datetime, limit: int = 10) -> list[Claim]:
                 if previous is not None and not (
                     (previous['state'] == 'sending' and previous['lease_until'] <= now)
                     or (previous['state'] == 'retry' and previous['retry_at'] <= now)
+                    or (previous['state'] == 'failed' and previous['revision'] != row['revision'])
                     or previous['state'] == 'obsolete'
                 ):
                     continue
