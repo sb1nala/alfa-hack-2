@@ -437,6 +437,141 @@ async def test_permanent_failure_does_not_overwrite_changed_reminder(storage_db,
 
 
 @pytest.mark.parametrize('mutation', ['pause_resume', 'rule_same_instant'])
+async def test_changed_version_recovers_failed_occurrence(storage_db, bot, clock, mutation):
+    pool, _ = storage_db
+    saved = await create(rule='FREQ=DAILY;COUNT=5')
+
+    async def send(*args, **kwargs):
+        if mutation == 'pause_resume':
+            await service.pause(saved.id, False)
+            await service.pause(saved.id, True)
+        else:
+            await service.set_schedule(saved.id, 'FREQ=WEEKLY;COUNT=3', START)
+        raise TelegramBadRequest(METHOD, 'synthetic failure')
+
+    bot.send_message.side_effect = send
+    assert await worker.run_once(bot, clock) == 1
+    failed = await event(pool, saved)
+    current = await reminders.get(saved.id)
+    assert failed['state'] == 'failed' and failed['attempts'] == 1
+    assert current.active and current.next_run_at == START
+    assert await service.due(clock()) == [current]
+    latest_rule = current.rrule
+
+    bot.send_message.side_effect = None
+    # Concurrent scans must acquire exactly one replacement lease.
+    passes = await asyncio.gather(*(worker.run_once(bot, clock) for _ in range(12)))
+    assert sum(passes) == 1
+    row = await event(pool, saved)
+    assert row['state'] == 'sent' and row['attempts'] == 2
+    assert row['token'] != failed['token']
+    assert row['error_code'] is None
+    current = await reminders.get(saved.id)
+    assert current.active and current.rrule == latest_rule
+    assert current.next_run_at == START + timedelta(days=1 if mutation == 'pause_resume' else 7)
+    assert await service.due(clock()) == []
+    for _ in range(3):
+        assert await worker.run_once(bot, clock) == 0
+    assert bot.send_message.await_count == 2
+
+
+@pytest.mark.parametrize('changed', [False, True])
+async def test_permanent_failure_stops_unchanged_version(storage_db, bot, clock, changed):
+    pool, _ = storage_db
+    saved = await create(rule='FREQ=DAILY;COUNT=5')
+
+    async def send(*args, **kwargs):
+        if changed and bot.send_message.await_count == 1:
+            await service.pause(saved.id, False)
+            await service.pause(saved.id, True)
+        raise TelegramBadRequest(METHOD, 'synthetic permanent failure')
+
+    bot.send_message.side_effect = send
+    assert await worker.run_once(bot, clock) == 1
+    if changed:
+        assert await worker.run_once(bot, clock) == 1
+    stopped = await reminders.get(saved.id)
+    assert not stopped.active
+    assert stopped.rrule == saved.rrule and stopped.next_run_at == START
+    for _ in range(3):
+        clock.now += timedelta(days=1)
+        passes = await asyncio.gather(*(worker.run_once(bot, clock) for _ in range(5)))
+        assert sum(passes) == 0
+    row = await event(pool, saved)
+    assert row['state'] == 'failed' and row['attempts'] == (2 if changed else 1)
+    assert bot.send_message.await_count == (2 if changed else 1)
+
+
+async def test_failed_recovery_lease_and_old_token_are_fenced(storage_db, bot, clock):
+    pool, _ = storage_db
+    saved = await create(rule='FREQ=DAILY;COUNT=5')
+    old, = await store.claim(clock())
+    await service.pause(saved.id, False)
+    await service.pause(saved.id, True)
+    assert await store.complete(old, clock(), state='failed', error_code='TelegramBadRequest')
+    results = await asyncio.gather(*(store.claim(clock()) for _ in range(30)))
+    assert sum(map(len, results)) == 1
+    fresh, = [item for claims in results for item in claims]
+    assert fresh.token != old.token and fresh.attempts == 2
+    assert not await store.authorize(old, clock())
+    assert not await store.complete(old, clock(), state='failed', blocked=True)
+    assert await pool.fetchval('SELECT count(*) FROM reminder_blocked_users') == 0
+    assert await store.claim(clock()) == []
+    clock.now += store.LEASE
+    replacement, = await store.claim(clock())
+    assert replacement.token != fresh.token
+    assert not await store.authorize(fresh, clock())
+    assert not await store.complete(fresh, clock(), state='sent')
+    await worker._send(replacement, bot, clock)
+    for _ in range(3):
+        assert await worker.run_once(bot, clock) == 0
+    assert (await event(pool, saved))['state'] == 'sent'
+    bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.parametrize('mutation', ['disable', 'delete', 'blocked', 'schedule'])
+async def test_failed_recovery_respects_latest_user_state(storage_db, bot, clock, mutation):
+    pool, _ = storage_db
+    saved = await create(rule='FREQ=DAILY;COUNT=5')
+
+    async def send(*args, **kwargs):
+        await service.pause(saved.id, False)
+        await service.pause(saved.id, True)
+        if mutation == 'blocked':
+            raise TelegramForbiddenError(METHOD, 'synthetic blocked recipient')
+        raise TelegramBadRequest(METHOD, 'synthetic failure')
+
+    bot.send_message.side_effect = send
+    await worker.run_once(bot, clock)
+    assert (await event(pool, saved))['state'] == 'failed'
+    if mutation == 'disable':
+        await store.disable(saved.id, USER)
+    elif mutation == 'delete':
+        await service.delete(saved.id)
+    elif mutation == 'schedule':
+        await service.set_schedule(saved.id, 'FREQ=WEEKLY;COUNT=3', START + timedelta(days=2))
+    expected = await reminders.get(saved.id)
+    for _ in range(3):
+        assert await worker.run_once(bot, clock) == 0
+    assert await reminders.get(saved.id) == expected
+    bot.send_message.assert_awaited_once()
+    if mutation == 'schedule':
+        clock.now = expected.next_run_at
+        bot.send_message.side_effect = None
+        assert await worker.run_once(bot, clock) == 1
+        current = await reminders.get(saved.id)
+        assert current.active and current.rrule == expected.rrule
+        assert current.next_run_at == expected.next_run_at + timedelta(days=7)
+    elif mutation == 'delete':
+        assert await event(pool, saved) is None
+    elif mutation == 'blocked':
+        # Even another user edit cannot override recipient suppression.
+        await service.set_schedule(saved.id, 'FREQ=WEEKLY;COUNT=3', START)
+        assert await worker.run_once(bot, clock) == 0
+        bot.send_message.assert_awaited_once()
+
+
+@pytest.mark.parametrize('mutation', ['pause_resume', 'rule_same_instant'])
 async def test_changed_same_instant_advances_latest_rule_without_resending(storage_db, bot, clock, mutation):
     saved = await create(rule='FREQ=DAILY;COUNT=5')
 
