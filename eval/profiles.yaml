@@ -1,0 +1,69 @@
+# Тестовые профили пользователей. Все люди и бизнесы придуманы, в выгрузке кейса профилей нет.
+# Поля и допустимые значения — как в UserProfile (app/models.py). Пропущенное поле = «не знаем».
+# intro — что такой человек мог бы написать боту о себе: по этой фразе проверяем,
+# что profile.update_from_message() достаёт те же поля.
+
+profiles:
+  - id: newbie_empty
+    title: Новичок, о котором ничего не известно
+    intro: null
+    profile: {}
+    checks: Бот полезен и без профиля — отвечает на вопрос и даёт общую стартовую подборку, анкету не навязывает.
+
+  - id: idea_stage
+    title: Хочет открыть кофейню, бизнеса ещё нет
+    intro: "хочу открыть свою кофейню, пока работаю в найме, с чего вообще начать?"
+    profile:
+      business_stage: idea
+      industry: Общепит
+      experience: beginner
+      current_goal: Запуск бизнеса
+    checks: Материалы для начинающих, без отчётности и найма; уточнение формы бизнеса уместно.
+
+  - id: ip_usn_shop
+    title: ИП на УСН «доходы», магазин одежды на маркетплейсах
+    intro: "я ип на упрощенке 6%, продаю одежду на вайлдберриз уже второй год"
+    profile:
+      business_stage: running
+      industry: Маркетплейсы
+      legal_form: ip
+      tax_regime: usn_income
+      experience: experienced
+      current_goal: Увеличение продаж
+    checks: Налоговые напоминания по УСН и взносам ИП; рекомендации про продажи и маркетплейсы, не «как открыть ИП».
+
+  - id: self_employed_designer
+    title: Самозанятая, дизайнер интерьеров
+    intro: "я самозанятая, делаю дизайн интерьеров, клиентов ищу сама"
+    profile:
+      business_stage: starting
+      industry: Услуги
+      legal_form: self_employed
+      tax_regime: npd
+      experience: beginner
+      current_goal: Поиск клиентов
+    checks: Налоговое напоминание — ежемесячный налог НПД; материалы про сотрудников и отчётность ООО не предлагаем.
+
+  - id: ooo_osno_production
+    title: ООО на общей системе, производство мебели, 15 сотрудников
+    intro: "у нас ооо, делаем мебель на заказ, в штате 15 человек, работаем с ндс"
+    profile:
+      business_stage: growing
+      industry: Производство
+      legal_form: ooo
+      tax_regime: osno
+      experience: experienced
+      current_goal: Поиск сотрудников
+    checks: Материалы про найм и управление командой; налоговый календарь ОСНО; базовые статьи для новичков — в конец.
+
+  - id: ip_patent_vladivostok
+    title: ИП на патенте, парикмахерская во Владивостоке
+    intro: "ип на патенте, у меня парикмахерская во владивостоке"
+    profile:
+      business_stage: running
+      industry: Красота
+      legal_form: ip
+      tax_regime: psn
+      experience: experienced
+      timezone: Asia/Vladivostok
+    checks: Время напоминаний считается по Владивостоку (UTC+10), тихие часы — тоже; сроки оплаты патента.
