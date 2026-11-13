@@ -185,7 +185,7 @@ async def test_retry_and_retry_after(storage_db, bot, clock, failure, delay, cap
 async def test_backoff_increases_and_is_bounded(storage_db, bot, clock):
     pool, _ = storage_db
     saved = await create()
-    bot.send_message.side_effect = OSError('secret')
+    bot.send_message.side_effect = TelegramRetryAfter(METHOD, 'secret', retry_after=0)
     for delay in [30, 60, 120]:
         await worker.run_once(bot, clock)
         row = await event(pool, saved)
@@ -248,7 +248,7 @@ async def test_schedule_error_records_sent_and_stops_only_problem(storage_db, bo
     bad = await create()
     await pool.execute('UPDATE reminders SET rrule=$2 WHERE id=$1', bad.id, rule)
     good = await create(user=USER + 1)
-    clock.now = datetime(2026, 3, 28, 2, tzinfo=timezone.utc)
+    clock.now = datetime(2026, 3, 28, 7, tzinfo=timezone.utc)
     await worker.run_once(bot, clock)
     row = await event(pool, bad)
     assert row['state'] == 'sent' and row['error_code'] == 'schedule_error'
@@ -374,8 +374,8 @@ async def test_cancelled_http_propagates_and_claim_recovers(storage_db, bot, clo
 
 
 async def test_batch_is_bounded(storage_db, bot, clock):
-    for _ in range(7):
-        await create()
+    for index in range(7):
+        await create(user=USER+index)
     assert await worker.run_once(bot, clock, batch_size=3) == 3
     assert bot.send_message.await_count == 3
     assert await worker.run_once(bot, clock, batch_size=3) == 3

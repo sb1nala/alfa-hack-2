@@ -1,254 +1,310 @@
-"""Список напоминаний: вид, смена частоты и отключение с проверкой владельца."""
+"""Management UI and durable actions on real PostgreSQL."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
-from zoneinfo import ZoneInfo
-
 import pytest
 from aiogram import Bot, Dispatcher
-from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import Update
-
-from app.bot import handlers
-from app.bot import reminder_list as ui
-from app.models import Answer, Reminder, UserProfile
-from app.reminders import service
-from app.reminders.schedule import canonicalize
-from app.storage import profiles, reminder_delivery, reminders
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
+from app.bot import handlers, reminder_list as ui
+from app.models import Reminder
+from app.reminders import service, worker
+from app.storage import reminders, profiles, reminder_controls as store
 from tests.test_reminder_commands import FakeSession
 
-MSK = ZoneInfo('Europe/Moscow')
-# Понедельник, 16 ноября 2026, 09:30 по Москве.
-RUN = datetime(2026, 11, 16, 6, 30, tzinfo=timezone.utc)
-USER = 8_200_000_001
+NOW = datetime(2026, 11, 13, 7, tzinfo=timezone.utc)
+USER = 8200000001
 
 
-def reminder(id_, text='Сверить кассу', kind='custom', rrule=None, active=True, run=RUN, user=101):
-    return Reminder(id_, user, kind, text, run, rrule, active)
+async def create(*, user=USER, rule=None, active=True, when=None, kind="custom"):
+    return await service.create(
+        Reminder(
+            0,
+            user,
+            kind,
+            "Сверить <кассу>",
+            when or NOW + timedelta(days=1),
+            rule,
+            active,
+        )
+    )
 
 
-def labels(keyboard):
-    return [[button.text for button in row] for row in keyboard.inline_keyboard]
+async def current(r):
+    return next(v for v in await store.list_for(r.user_id) if v.reminder.id == r.id)
 
 
-def data(keyboard):
-    return [button.callback_data for row in keyboard.inline_keyboard for button in row]
+async def propose(r, action):
+    v = await current(r)
+    return await store.propose(r.user_id, r.id, v.revision, action, NOW)
 
 
-# --- вид списка ---
+@pytest.mark.parametrize(
+    "text", ["покажи мои напоминания", "список напоминаний", "какие у меня напоминания"]
+)
+def test_plain_request(text):
+    assert ui.is_list_request(text)
+    assert not ui.is_list_request("напомни завтра в 10")
 
 
-def test_empty_list_explains_how_to_create():
-    text, keyboard = ui.render([], 'Europe/Moscow')
-    assert text == ui.EMPTY_TEXT and keyboard is None
-    text, keyboard = ui.render([reminder(1, active=False)], 'Europe/Moscow')
-    assert text == ui.EMPTY_TEXT and keyboard is None
+def test_render_empty_pagination_and_escaping():
+    assert ui.render([], "Europe/Moscow") == (ui.EMPTY_TEXT, None)
+    items = [
+        Reminder(i, USER, "custom", "Длинное <дело> " + "x" * 200, NOW, None, False)
+        for i in range(19)
+    ]
+    seen = []
+    for page in range(3):
+        text, kb = ui.render(items, "Asia/Vladivostok", page=page)
+        assert "Пауза" in text and "Asia/Vladivostok" in text and "&lt;дело&gt;" in text
+        seen += [
+            int(b.callback_data.split(":")[2])
+            for row in kb.inline_keyboard
+            for b in row
+            if b.callback_data.startswith("rm:v:")
+        ]
+    assert seen == list(range(19))
 
 
-def test_own_reminders_are_numbered_with_local_time_repeat_and_buttons():
-    weekly = canonicalize('FREQ=WEEKLY;BYDAY=MO', RUN, 'Europe/Moscow')
-    text, keyboard = ui.render(
-        [reminder(7), reminder(9, 'Проверять <заказы>', rrule=weekly)], 'Europe/Moscow')
-    assert '1. Сверить кассу\n    16.11.2026 09:30, понедельник · один раз' in text
-    assert '2. Проверять &lt;заказы&gt;\n    16.11.2026 09:30, понедельник · каждую неделю' in text
-    assert labels(keyboard) == [['1. Частота', '1. Отключить'], ['2. Частота', '2. Отключить']]
-    assert data(keyboard) == ['rm:f:7', 'rm:off:7', 'rm:f:9', 'rm:off:9']
+async def test_owner_version_confirmation_pause_resume_delete(storage_db):
+    r = await create(rule="FREQ=DAILY;COUNT=5")
+    other = await create(user=USER + 1)
+    v = await current(r)
+    with pytest.raises(ValueError):
+        await store.propose(USER + 1, r.id, v.revision, "delete", NOW)
+    token, _, _ = await propose(r, "pause")
+    assert (await reminders.get(r.id)).active
+    await store.apply(USER, token, NOW)
+    assert not (await reminders.get(r.id)).active
+    with pytest.raises(ValueError):
+        await store.apply(USER, token, NOW)
+    token, _, run = await propose(r, "resume")
+    assert run > NOW
+    await store.apply(USER, token, NOW)
+    old, _, _ = await propose(r, "delete")
+    await service.pause(r.id, False)
+    with pytest.raises(ValueError):
+        await store.apply(USER, old, NOW)
+    token, _, _ = await propose(r, "delete")
+    await store.apply(USER, token, NOW)
+    assert await reminders.get(r.id) is None
+    assert await reminders.get(other.id) == other
 
 
-def test_time_is_shown_in_the_user_zone():
-    text, _ = ui.render([reminder(1)], 'Asia/Vladivostok')
-    assert '16.11.2026 16:30, понедельник' in text
-    assert '16.11.2026 09:30' in ui.render([reminder(1)], 'Mars/Olympus')[0]
+async def test_less_double_click_profile_zone_and_pause(storage_db):
+    r = await create(rule="FREQ=DAILY;COUNT=10", active=False)
+    await profiles.update(USER, {"timezone": "Asia/Vladivostok"})
+    token, rule, run = await propose(r, "less")
+    assert (
+        "INTERVAL=2" in rule
+        and "COUNT=5" in rule
+        and rule.splitlines()[0] == r.rrule.splitlines()[0]
+    )
+    assert await reminders.get(r.id) == r
+    result = await asyncio.gather(
+        store.apply(USER, token, NOW),
+        store.apply(USER, token, NOW),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(x, ValueError) for x in result) == 1
+    changed = await reminders.get(r.id)
+    assert not changed.active and changed.rrule == rule and changed.next_run_at == run
 
 
-def test_tax_reminders_are_one_line_with_the_nearest_date():
-    items = [reminder(n, f'Налог {n}', kind='tax', run=RUN + timedelta(days=30 * n)) for n in (3, 1, 2)]
-    text, keyboard = ui.render([reminder(50), *items], 'Europe/Moscow')
-    assert '<b>Налоговые напоминания</b>: 3, ближайшее — 16.12.2026 09:30' in text
-    assert 'Налог 1' not in text
-    assert labels(keyboard)[-1] == ['Отключить налоговые'] and data(keyboard)[-1] == 'tx:off'
+async def test_completed_and_overdue_one_off(storage_db):
+    r = await create(when=NOW - timedelta(days=1), active=False)
+    with pytest.raises(ValueError, match="Срок прошёл"):
+        await propose(r, "resume")
+    token, _, _ = await propose(r, "now")
+    await store.apply(USER, token, NOW + timedelta(seconds=1))
+    bot = type(
+        "Bot",
+        (),
+        {"send_message": AsyncMock(return_value=type("M", (), {"message_id": 1})())},
+    )()
+    await worker.run_once(bot, lambda: NOW + timedelta(seconds=1))
+    assert (await current(r)).status == "Завершено"
+    with pytest.raises(ValueError, match="завершено"):
+        await propose(r, "resume")
 
 
-def test_long_list_and_long_text_are_shortened():
-    items = [reminder(n, 'Очень длинное дело ' * 10 + '\nвторая строка') for n in range(1, 12)]
-    text, keyboard = ui.render(items, 'Europe/Moscow')
-    assert len(keyboard.inline_keyboard) == ui.MAX_SHOWN
-    assert '…и ещё 3.' in text and 'вторая строка' not in text
-    assert all(len(line) <= ui.MAX_LINE + 4 for line in text.split('\n') if line[:1].isdigit())
-
-
-def test_note_is_shown_above_the_list_and_alone_when_nothing_is_left():
-    text, _ = ui.render([reminder(1)], 'Europe/Moscow', 'Отключил: «Сверить <кассу>».')
-    assert text.startswith('Отключил: «Сверить &lt;кассу&gt;».\n\n<b>Ваши напоминания</b>')
-    text, keyboard = ui.render([], 'Europe/Moscow', 'Отключил: «Дело».')
-    assert text.startswith('Отключил: «Дело».') and ui.EMPTY_TEXT in text and keyboard is None
-
-
-@pytest.mark.parametrize(('frequency', 'rule'), [
-    ('once', None), ('daily', 'FREQ=DAILY'), ('weekly', 'FREQ=WEEKLY;BYDAY=MO'),
-    ('monthly', 'FREQ=MONTHLY;BYMONTHDAY=16'),
-])
-def test_rule_starts_from_the_time_already_set(frequency, rule):
-    assert ui.rule_for(frequency, reminder(1), MSK) == rule
-    if rule:  # расписание принимает правило: назначенное время — его событие
-        assert canonicalize(rule, RUN, 'Europe/Moscow')
-
-
-def test_weekday_and_day_follow_the_user_zone():
-    late = reminder(1, run=datetime(2026, 11, 16, 20, 0, tzinfo=timezone.utc))  # во Владивостоке уже вторник
-    assert ui.rule_for('weekly', late, ZoneInfo('Asia/Vladivostok')) == 'FREQ=WEEKLY;BYDAY=TU'
-    assert ui.rule_for('monthly', late, ZoneInfo('Asia/Vladivostok')) == 'FREQ=MONTHLY;BYMONTHDAY=17'
-
-
-@pytest.mark.parametrize(('text', 'expected'), [
-    ('покажи мои напоминания', True), ('Мои напоминания', True), ('какие у меня напоминания', True),
-    ('список напоминаний', True), ('напомни завтра в 10 сверить кассу', False),
-    ('напоминай о налогах', False), ('что такое франшиза', False),
-])
-def test_list_request_detection(text, expected):
-    assert ui.is_list_request(text) is expected
-
-
-# --- диалог ---
+@pytest.mark.parametrize(
+    "kind,rule", [("tax", "FREQ=DAILY"), ("tax", None), ("custom", None)]
+)
+async def test_forged_less_rejected(storage_db, kind, rule):
+    r = await create(kind=kind, rule=rule)
+    with pytest.raises(ValueError):
+        await propose(r, "less")
 
 
 @pytest.fixture
-async def chat(monkeypatch, no_profile_input):
+async def chat(storage_db, monkeypatch):
     session = FakeSession()
-    bot = Bot('123456:fake-test-token', session=session)
-    dispatcher = Dispatcher()
-    dispatcher.message.handlers = handlers.router.message.handlers.copy()
-    dispatcher.callback_query.handlers = handlers.router.callback_query.handlers.copy()
-    store = {7: reminder(7), 9: reminder(9, 'Чужое дело', user=202)}
+    bot = Bot("123456:fake-test-token", session=session)
+    dp = Dispatcher()
+    dp.message.handlers = handlers.router.message.handlers.copy()
+    dp.callback_query.handlers = handlers.router.callback_query.handlers.copy()
+    monkeypatch.setattr(ui, "utcnow", lambda: NOW)
 
-    async def get(reminder_id):
-        return store.get(reminder_id)
-
-    async def list_for(user_id):
-        return [item for item in store.values() if item.user_id == user_id]
-
-    async def set_schedule(reminder_id, rrule, next_run_at):
-        store[reminder_id] = reminder(reminder_id, store[reminder_id].text, rrule=rrule)
-        return store[reminder_id]
-
-    async def disable(reminder_id, user_id):
-        store[reminder_id] = reminder(reminder_id, store[reminder_id].text, active=False)
-        return 'disabled'
-
-    reply = AsyncMock(return_value=Answer('no_answer', 'Ответ'))
-    monkeypatch.setattr(handlers.core, 'reply', reply)
-    monkeypatch.setattr(profiles, 'get', AsyncMock(return_value=UserProfile(101)))
-    monkeypatch.setattr(reminders, 'get', get)
-    monkeypatch.setattr(service, 'list_for', list_for)
-    monkeypatch.setattr(service, 'set_schedule', AsyncMock(side_effect=set_schedule))
-    monkeypatch.setattr(reminder_delivery, 'disable', AsyncMock(side_effect=disable))
-
-    async def feed(text=None, *, data=None, group=False):
-        message = {'message_id': 1, 'date': 1,
-                   'chat': {'id': 101, 'type': 'group' if group else 'private'}}
-        user = {'id': 101, 'is_bot': False, 'first_name': 'Тест'}
-        if data is None:
-            update = {'update_id': 1, 'message': {**message, 'from': user, 'text': text}}
-        else:
-            update = {'update_id': 1, 'callback_query': {
-                'id': 'cb', 'from': user, 'chat_instance': 'test', 'data': data,
-                'message': {**message, 'from': {'id': 1, 'is_bot': True, 'first_name': 'Бот'},
-                            'text': 'старый текст'}}}
+    async def feed(text=None, data=None, group=False, user=USER):
+        message = {
+            "message_id": 1,
+            "date": 1,
+            "chat": {"id": user, "type": "group" if group else "private"},
+        }
+        person = {"id": user, "is_bot": False, "first_name": "Тест"}
+        payload = (
+            {"update_id": 1, "message": {**message, "from": person, "text": text}}
+            if data is None
+            else {
+                "update_id": 1,
+                "callback_query": {
+                    "id": "test",
+                    "from": person,
+                    "chat_instance": "test",
+                    "data": data,
+                    "message": message,
+                },
+            }
+        )
         session.calls.clear()
-        await dispatcher.feed_update(bot, Update.model_validate(update))
+        await dp.feed_update(bot, Update.model_validate(payload))
         return list(session.calls)
 
-    yield feed, store, reply
-    await bot.session.close()
+    yield feed
+    await session.close()
 
 
-def edited(calls):
-    return next(call for call in calls if isinstance(call, EditMessageText))
+def screen(calls):
+    return next(c for c in calls if isinstance(c, (SendMessage, EditMessageText)))
 
 
-def answered(calls):
-    return next(call for call in calls if isinstance(call, AnswerCallbackQuery))
+def buttons(message):
+    return [
+        b.callback_data for row in message.reply_markup.inline_keyboard for b in row
+    ]
 
 
-async def test_command_and_plain_words_show_only_own_reminders(chat):
-    feed, _, reply = chat
-    for request in ('/reminders', 'покажи мои напоминания'):
-        calls = await feed(request)
-        assert isinstance(calls[-1], SendMessage)
-        assert 'Сверить кассу' in calls[-1].text and 'Чужое дело' not in calls[-1].text
-    reply.assert_not_awaited()
+async def test_routed_list_pages_detail_confirm_foreign_group(chat):
+    rs = [await create() for _ in range(10)]
+    await create(user=USER + 1)
+    for text in ("/reminders", "покажи мои напоминания"):
+        page = screen(await chat(text))
+        assert len([b for b in buttons(page) if b.startswith("rm:v:")]) == 8
+    page = screen(await chat(data="rm:list:1"))
+    assert f"rm:v:{rs[-1].id}" in buttons(page)
+    detail = screen(await chat(data=f"rm:v:{rs[0].id}"))
+    delete = next(b for b in buttons(detail) if b.endswith(":delete"))
+    preview = screen(await chat(data=delete))
+    assert "без возможности восстановления" in preview.text
+    assert await reminders.get(rs[0].id)
+    confirmation = next(b for b in buttons(preview) if b.startswith("rm:yes:"))
+    foreign = await chat(data=confirmation, user=USER + 1)
+    assert any(isinstance(c, AnswerCallbackQuery) for c in foreign)
+    await chat(data=confirmation)
+    assert await reminders.get(rs[0].id) is None
+    for callback in (
+        confirmation,
+        delete,
+        "rm:s:1:daily",
+        "rm:p:1:bad:less",
+        "rm:garbage",
+    ):
+        assert any(
+            isinstance(c, AnswerCallbackQuery) for c in await chat(data=callback)
+        )
+    assert screen(await chat("/reminders", group=True)).text == ui.PRIVATE_ONLY_TEXT
+    assert len(await service.list_for(USER)) == 9
 
 
-async def test_changing_frequency_goes_through_a_choice_and_back_to_the_list(chat):
-    feed, store, _ = chat
-    choice = edited(await feed(data='rm:f:7'))
-    assert 'Как часто напоминать?' in choice.text and 'Сейчас: один раз.' in choice.text
-    assert labels(choice.reply_markup) == [
-        ['Один раз', 'Каждый день'], ['Каждую неделю', 'Каждый месяц'], ['Назад к списку']]
-    done = edited(await feed(data='rm:s:7:weekly'))
-    service.set_schedule.assert_awaited_once_with(7, 'FREQ=WEEKLY;BYDAY=MO', RUN)
-    assert done.text.startswith('Готово: теперь «Сверить кассу» — каждую неделю.')
-    assert store[7].rrule == 'FREQ=WEEKLY;BYDAY=MO'
-    back = edited(await feed(data='rm:s:7:once'))
-    assert store[7].rrule is None and '— один раз.' in back.text
+async def test_delivery_less_button_and_stale_after_change(chat, storage_db):
+    r = await create(rule="FREQ=DAILY;COUNT=8", when=NOW)
+    bot = type(
+        "Bot",
+        (),
+        {"send_message": AsyncMock(return_value=type("M", (), {"message_id": 1})())},
+    )()
+    await worker.run_once(bot, lambda: NOW)
+    data = (
+        bot.send_message.await_args.kwargs["reply_markup"]
+        .inline_keyboard[0][1]
+        .callback_data
+    )
+    preview = screen(await chat(data=data))
+    assert "интервал 2" in preview.text
+    yes = next(b for b in buttons(preview) if b.startswith("rm:yes:"))
+    await chat(data=yes)
+    changed = await reminders.get(r.id)
+    await chat(data=yes)
+    await chat(data=data)
+    assert await reminders.get(r.id) == changed
 
 
-async def test_disable_removes_the_reminder_from_the_list(chat):
-    feed, store, _ = chat
-    done = edited(await feed(data='rm:off:7'))
-    reminder_delivery.disable.assert_awaited_once_with(7, 101)
-    assert done.text.startswith('Отключил: «Сверить кассу».') and ui.EMPTY_TEXT in done.text
-    assert store[7].active is False
+async def test_cancel_expire_and_forged_now_repeat(storage_db):
+    r = await create(rule="FREQ=DAILY;UNTIL=20261120T070000Z", active=False)
+    with pytest.raises(ValueError):
+        await propose(r, "now")
+    token, _, _ = await propose(r, "delete")
+    await store.cancel(USER, token)
+    with pytest.raises(ValueError):
+        await store.apply(USER, token, NOW)
+    token, _, _ = await propose(r, "delete")
+    with pytest.raises(ValueError):
+        await store.apply(USER, token, NOW + timedelta(minutes=15))
+    assert await reminders.get(r.id) == r
 
 
-@pytest.mark.parametrize('data', ['rm:f:9', 'rm:s:9:daily', 'rm:off:9', 'rm:off:404', 'rm:f:0'])
-async def test_foreign_or_missing_reminder_is_never_touched(chat, data):
-    feed, store, _ = chat
-    calls = await feed(data=data)
-    assert answered(calls).text == ui.GONE_TEXT
-    assert 'Чужое дело' not in edited(calls).text
-    service.set_schedule.assert_not_awaited()
-    reminder_delivery.disable.assert_not_awaited()
-    assert store[9].active and store[9].rrule is None
+async def test_resume_paused_repeat_after_sent_and_http_mutation(storage_db):
+    r = await create(rule="FREQ=DAILY;COUNT=8", when=NOW)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def send(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return type("M", (), {"message_id": 1})()
+
+    b = type("Bot", (), {"send_message": AsyncMock(side_effect=send)})()
+    task = asyncio.create_task(worker.run_once(b, lambda: NOW))
+    await asyncio.wait_for(entered.wait(), 3)
+    try:
+        token, _, _ = await propose(r, "pause")
+        await store.apply(USER, token, NOW)
+        paused = await reminders.get(r.id)
+    finally:
+        release.set()
+        await task
+    assert await reminders.get(r.id) == paused
+    assert (await current(r)).status == "Пауза"
+    token, _, run = await propose(r, "resume")
+    assert run == NOW + timedelta(days=1)
+    await store.apply(USER, token, NOW)
+    assert (await reminders.get(r.id)).next_run_at == run
 
 
-@pytest.mark.parametrize('data', ['rm:', 'rm:zzz', 'rm:s:7:hourly', 'rm:s:7', 'rm:off:abc'])
-async def test_broken_buttons_are_answered_and_change_nothing(chat, data):
-    feed, store, _ = chat
-    calls = await feed(data=data)
-    assert isinstance(calls[-1], (AnswerCallbackQuery, EditMessageText))
-    service.set_schedule.assert_not_awaited()
-    reminder_delivery.disable.assert_not_awaited()
-    assert store[7].active and store[7].rrule is None
+@pytest.mark.parametrize("frequency", ["daily", "weekly", "monthly", "once"])
+async def test_frequency_replacement_preview_pause_and_anchor(storage_db, frequency):
+    r = await create(rule="FREQ=DAILY;COUNT=90", active=False)
+    await profiles.update(USER, {"timezone": "Asia/Vladivostok"})
+    token, rule, run = await propose(r, frequency)
+    assert await reminders.get(r.id) == r
+    if frequency == "once":
+        assert rule is None
+    else:
+        assert rule.splitlines()[0] == r.rrule.splitlines()[0]
+        assert "COUNT=" in rule and "FREQ=" + frequency.upper() in rule
+    await store.apply(USER, token, NOW)
+    result = await reminders.get(r.id)
+    assert not result.active and result.next_run_at == run and result.rrule == rule
 
 
-async def test_storage_failure_is_reported_without_details(chat, monkeypatch):
-    feed, *_ = chat
-    monkeypatch.setattr(service, 'set_schedule', AsyncMock(side_effect=RuntimeError('secret dsn')))
-    calls = await feed(data='rm:s:7:daily')
-    assert answered(calls).text == ui.FAILED_TEXT and 'secret' not in answered(calls).text
-
-
-async def test_group_chat_gets_no_list(chat):
-    feed, _, reply = chat
-    assert (await feed('/reminders', group=True))[-1].text == ui.PRIVATE_ONLY_TEXT
-    await feed('покажи мои напоминания', group=True)
-    reply.assert_awaited_once()
-
-
-# --- настоящая база ---
-
-
-async def test_frequency_change_is_saved_with_the_user_zone_and_keeps_the_time(storage_db):
-    await profiles.update(USER, {'timezone': 'Asia/Vladivostok'})
-    saved = await service.create(Reminder(0, USER, 'custom', 'Вымышленная сверка', RUN, None))
-    rule = ui.rule_for('weekly', saved, ZoneInfo('Asia/Vladivostok'))
-    changed = await service.set_schedule(saved.id, rule, saved.next_run_at)
-    assert changed.next_run_at == RUN
-    # Расписание хранит поля правила в алфавитном порядке.
-    assert changed.rrule == 'DTSTART;TZID=Asia/Vladivostok:20261116T163000\nRRULE:BYDAY=MO;FREQ=WEEKLY'
-    assert (await service.set_schedule(saved.id, None, saved.next_run_at)).rrule is None
-    assert await ui._owned(saved.id, USER) is not None
-    assert await ui._owned(saved.id, USER + 1) is None
-    await reminder_delivery.disable(saved.id, USER)
-    assert await ui._owned(saved.id, USER) is None
+async def test_oneoff_to_repeat_is_explicit_and_tax_type_forgery_fails(storage_db):
+    r = await create()
+    token, rule, run = await propose(r, "weekly")
+    assert "FREQ=WEEKLY" in rule and not r.rrule
+    await store.apply(USER, token, NOW)
+    assert (await reminders.get(r.id)).rrule == rule
+    tax = await create(kind="tax")
+    with pytest.raises(ValueError):
+        await propose(tax, "daily")

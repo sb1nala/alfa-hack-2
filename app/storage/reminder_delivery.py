@@ -88,7 +88,10 @@ async def claim(now: datetime, limit: int = 10) -> list[Claim]:
                        OR (d.state='retry' AND d.retry_at <= $1)
                        OR (d.state='failed' AND d.revision <> r.xmin::text)
                        OR d.state='obsolete')
-                ORDER BY r.next_run_at, r.id LIMIT $2 FOR UPDATE OF r SKIP LOCKED
+                ORDER BY (SELECT count(*) FROM reminders earlier
+                    WHERE earlier.user_id=r.user_id AND earlier.active AND earlier.next_run_at <= $1
+                      AND (earlier.next_run_at,earlier.id)<(r.next_run_at,r.id)),
+                    r.next_run_at, r.id LIMIT $2 FOR UPDATE OF r SKIP LOCKED
             ''', now, limit)
             claims = []
             for row in rows:
@@ -176,12 +179,21 @@ async def complete(item: Claim, now: datetime, *, state: str, error_code: str | 
                     INSERT INTO reminder_blocked_users (user_id,blocked_at,error_code)
                     VALUES ($1,$2,'TelegramForbiddenError') ON CONFLICT (user_id) DO NOTHING
                 ''', r.user_id, now)
+            advanced_revision = None
             if state in {'sent', 'failed'}:
-                await connection.execute('''
+                advanced_revision = await connection.fetchval('''
                     UPDATE reminders SET active=$4, next_run_at=COALESCE($5,next_run_at)
                     WHERE id=$1 AND xmin::text=$2 AND active AND next_run_at=$3
+                    RETURNING xmin::text
                 ''', r.id, item.revision, r.next_run_at,
                     state == 'sent' and next_run_at is not None, next_run_at)
+            if state == 'sent' and advanced_revision is not None:
+                # Advance changes xmin; bind the delivered button to that result,
+                # only if this worker actually advanced its unchanged snapshot.
+                await connection.execute('''
+                    INSERT INTO reminder_delivery_buttons (token,reminder_id,revision)
+                    VALUES ($1,$2,$3) ON CONFLICT DO NOTHING
+                ''', item.token, r.id, advanced_revision)
             return True
 
 

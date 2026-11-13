@@ -151,6 +151,9 @@ async def _show(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMark
 
 
 async def on_callback(callback: CallbackQuery) -> None:
+    if callback.message is None or callback.message.chat.type != "private":
+        await callback.answer(PRIVATE_ONLY_TEXT, show_alert=True)
+        return
     user_id = callback.from_user.id
     action, _, value = (callback.data or "")[3:].partition(":")
     now = utcnow()
@@ -180,7 +183,7 @@ async def on_callback(callback: CallbackQuery) -> None:
                 created = await tax.subscribe(profile, now)
                 if created:
                     text = (f"Готово, поставил напоминаний: {created}. Под каждым будет кнопка "
-                            "«Отключить», а все сразу можно отключить здесь.")
+                            "«Отключить», а все сразу можно отключить здесь. Доставка с 09:00 до 21:00 по текущему профилю, не более двух инициативных сообщений в день; возможен перенос.")
                 else:
                     text = "Эти напоминания у вас уже стоят — новых не добавил."
                 keyboard = off_keyboard()

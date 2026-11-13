@@ -19,6 +19,7 @@ USER_ID = 5_000_000_001
 OTHER_USER_ID = 5_000_000_002
 TABLES = {"users", "profiles", "reminders", "events", "shown_materials"}
 UI_TABLES = {"profile_ui_sessions"}
+CONTROL_TABLES = {"reminder_actions", "reminder_quota", "reminder_delivery_buttons"}
 DELIVERY_TABLES = {"reminder_drafts", "reminder_deliveries", "reminder_blocked_users"}
 WHEN = datetime(2026, 11, 12, 10, 15, tzinfo=timezone(timedelta(hours=5, minutes=30)))
 
@@ -65,7 +66,7 @@ async def test_tables_and_reapplication_preserve_every_row(schema_db):
     tables = await connection.fetch(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
     )
-    assert {row["tablename"] for row in tables} == TABLES | DELIVERY_TABLES | UI_TABLES
+    assert {row["tablename"] for row in tables} == TABLES | DELIVERY_TABLES | UI_TABLES | CONTROL_TABLES
     await seed_all(connection)
     before = {table: await connection.fetch(f'SELECT * FROM "{table}"')
               for table in TABLES | DELIVERY_TABLES | UI_TABLES}

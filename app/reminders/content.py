@@ -74,7 +74,7 @@ def confirmation(text: str, run_at: datetime, zone: str, rrule: str | None = Non
         when = f'Первый раз: {when}\nПовтор: {repeat}'
     return (f'<b>Создать напоминание?</b>\n{escape(checked_text(text))}\n\n'
             f'{when}\n'
-            'Подтверждение действует 15 минут.')
+            'Подтверждение действует 15 минут. Доставка с 09:00 до 21:00 по текущему профилю, не более двух инициативных сообщений в день; возможен перенос.')
 
 
 def delivery(text: str) -> str:
