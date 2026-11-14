@@ -22,9 +22,26 @@ STOP_WORDS = frozenset(
     их чем была сам чтоб без будто чего раз тоже себе под будет ж тогда кто этот того потому
     этого какой совсем ним здесь этом один почти мой тем чтобы нее были куда зачем всех можно
     при об это эта эти мои моя мое про нужно подскажите пожалуйста расскажите хочу такое
+    простыми словами вообще расскажи подробно посоветуете посоветуйте помогите нужен нужна
     """.split()
 )
+# Как пользователи пишут названия площадок и как они записаны в материалах.
+ALIASES = {
+    "вайлдберриз": "wildberries",
+    "вайлдберис": "wildberries",
+    "вайлдбериз": "wildberries",
+    "валберис": "wildberries",
+    "вб": "wildberries",
+    "wb": "wildberries",
+    "озон": "ozon",
+    "озоне": "ozon",
+}
 MAX_PER_MATERIAL = 2
+# Редкое слово не должно в одиночку решать, подходит ли фрагмент: в разговорной фразе
+# самыми редкими часто оказываются слова без смысла для поиска («не пошёл», «с нуля»).
+IDF_CAP = 5.0
+# Слово вопроса в названии материала весит больше, чем то же слово в тексте.
+TITLE_BOOST = 1.5
 
 
 def tokenize(text: str) -> list[str]:
@@ -33,6 +50,7 @@ def tokenize(text: str) -> list[str]:
     for word in _WORD.findall(text.lower().replace("ё", "е")):
         if word in STOP_WORDS:
             continue
+        word = ALIASES.get(word, word)
         stem = _STEM_CACHE.get(word)
         if stem is None:
             stem = _STEM_CACHE[word] = _STEMMER.stemWord(word)
@@ -47,8 +65,14 @@ class SearchIndex:
         self._b = b
         self._postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
         self._lengths: list[int] = []
+        self._title_terms: list[frozenset[str]] = []
+        title_cache: dict[str, frozenset[str]] = {}
         for number, chunk in enumerate(chunks):
-            tokens = tokenize(f"{chunk.material.title}\n{chunk.text}")
+            title = chunk.material.title
+            if title not in title_cache:
+                title_cache[title] = frozenset(tokenize(title))
+            self._title_terms.append(title_cache[title])
+            tokens = tokenize(f"{title}\n{chunk.text}")
             self._lengths.append(len(tokens))
             for term, count in Counter(tokens).items():
                 self._postings[term].append((number, count))
@@ -63,29 +87,35 @@ class SearchIndex:
     def __len__(self) -> int:
         return len(self._chunks)
 
-    def search(self, query: str, k: int = 6, min_coverage: float = 0.6) -> list[Chunk]:
+    def search(self, query: str, k: int = 6, min_coverage: float = 0.5) -> list[Chunk]:
         """До k фрагментов, лучший первым.
 
-        Фрагмент подходит, только если покрывает не меньше min_coverage веса слов запроса
-        (редкие слова весят больше). Так вопрос не по теме базы не получает случайных ответов.
+        Фрагмент подходит, только если покрывает больше min_coverage веса слов запроса
+        (редкие слова весят больше, но не больше IDF_CAP). Так вопрос не по теме базы
+        не получает случайных ответов, а лишнее редкое слово не отсекает нужный материал.
         """
         terms = set(tokenize(query))
         if not terms or not self._chunks:
             return []
-        query_weight = sum(self._idf.get(term, self._unknown_idf) for term in terms)
+        query_weight = sum(
+            min(self._idf.get(term, self._unknown_idf), IDF_CAP) for term in terms
+        )
         scores: dict[int, float] = defaultdict(float)
         covered: dict[int, float] = defaultdict(float)
         for term in terms:
             idf = self._idf.get(term)
             if idf is None:
                 continue
+            weight = min(idf, IDF_CAP)
             for number, count in self._postings[term]:
                 length_ratio = self._lengths[number] / self._average_length
                 norm = self._k1 * (1 - self._b + self._b * length_ratio)
-                scores[number] += idf * count * (self._k1 + 1) / (count + norm)
-                covered[number] += idf
+                scores[number] += weight * count * (self._k1 + 1) / (count + norm)
+                if term in self._title_terms[number]:
+                    scores[number] += weight * TITLE_BOOST
+                covered[number] += weight
         ranked = sorted(
-            (number for number in scores if covered[number] / query_weight >= min_coverage),
+            (number for number in scores if covered[number] / query_weight > min_coverage),
             key=lambda number: scores[number],
             reverse=True,
         )
